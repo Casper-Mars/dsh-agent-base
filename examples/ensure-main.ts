@@ -16,6 +16,7 @@ import type { Agent, AgentHandle, AgentOptions, AgentSetup } from '@deepseek-ai/
 import type { ContextFormed } from '@deepseek-ai/dsh-llm'
 import { createUserMessage } from '@deepseek-ai/dsh-llm'
 import type { SessionId } from '@deepseek-ai/dsh-session'
+import { realpath } from 'node:fs/promises'
 // 仅为加载这两个包的 Context 模块增强（`ctx.agentPresets` / `ctx.agentDefaultModel`）。
 import type {} from '@deepseek-ai/dsh-agent-preset-registry'
 import type {} from '@deepseek-ai/dsh-agent-default-model'
@@ -50,12 +51,53 @@ export interface DeliverInput {
 }
 
 /**
- * single-flight：同一 Context 上并发的首次投递只跑一次 create/resume。
+ * single-flight：同一 Context、同一 session 上并发的 ensure 只跑一次。
  *
- * base 不提供这个能力——并发保护是消费方的责任，否则两个 create 会有一个
- * 收到 already exists。
+ * main 与显式 session 共用这张表：key 是 sessionId，因此两个并发的显式
+ * `deliver({ sessionId })` 也只会调用一次 `resume`。
+ *
+ * base 不提供这个能力——并发保护是消费方的责任，否则两个 create/resume
+ * 会有一个收到 already exists。
  */
-const inflight = new WeakMap<Context, Promise<Agent>>()
+const inflight = new WeakMap<Context, Map<SessionId, Promise<Agent>>>()
+
+/** 对 `(ctx, sessionId)` 做 single-flight；任务结束后释放槽位。 */
+function singleFlight(
+  ctx: Context,
+  sessionId: SessionId,
+  run: () => Promise<Agent>,
+): Promise<Agent> {
+  let sessions = inflight.get(ctx)
+  if (sessions === undefined) {
+    sessions = new Map<SessionId, Promise<Agent>>()
+    inflight.set(ctx, sessions)
+  }
+  const map = sessions
+
+  const running = map.get(sessionId)
+  if (running !== undefined) return running
+
+  const task = run().finally(() => {
+    if (map.get(sessionId) === task) map.delete(sessionId)
+  })
+  map.set(sessionId, task)
+  return task
+}
+
+/**
+ * canonical cwd 比较，语义与 `src/validate.ts` 的 `canonicalEquals` 对齐：
+ * 字符串相等直接通过；否则只对实际值做 `realpath` 归一后比较；
+ * `realpath` 失败（路径不存在等）视为不匹配。
+ */
+async function sameCwd(actual: string | undefined, expected: string): Promise<boolean> {
+  if (actual === undefined) return false
+  if (actual === expected) return true
+  try {
+    return (await realpath(actual)) === expected
+  } catch {
+    return false
+  }
+}
 
 /** 读取当前默认模型；`resume` 不带 `agentOptions` 会恢复出没有模型的 Agent。 */
 function defaultAgentOptions(ctx: Context): AgentOptions {
@@ -83,14 +125,9 @@ function releaseOnUnload(ctx: Context, handle: AgentHandle): void {
  *   stat 无快照 → `create`（meta.cwd 固定为 workspaceCwd）→ `attachSession`
  */
 export function ensureMain(ctx: Context, agentPreset?: string): Promise<Agent> {
-  const running = inflight.get(ctx)
-  if (running !== undefined) return running
-
-  const task = createOrResumeMain(ctx, agentPreset).finally(() => {
-    inflight.delete(ctx)
-  })
-  inflight.set(ctx, task)
-  return task
+  return singleFlight(ctx, ctx.agentBase.mainSessionId, () =>
+    createOrResumeMain(ctx, agentPreset),
+  )
 }
 
 async function createOrResumeMain(ctx: Context, agentPreset?: string): Promise<Agent> {
@@ -108,7 +145,8 @@ async function createOrResumeMain(ctx: Context, agentPreset?: string): Promise<A
   const snapshot = await ctx.sessionPersistence.stat(mainSessionId)
   if (snapshot !== undefined) {
     // base 启动时已校验过一次；消费方在真正恢复前仍要自己再校验，避免运行期被改绑。
-    if (snapshot.header.cwd !== workspaceCwd) {
+    // 比较用 canonical 语义（与 base 一致），历史 session 的 symlink 拼写不会误报。
+    if (!(await sameCwd(snapshot.header.cwd, workspaceCwd))) {
       throw new Error(
         `main session '${mainSessionId}' lives in '${snapshot.header.cwd ?? '<none>'}', ` +
           `expected '${workspaceCwd}'`,
@@ -148,7 +186,11 @@ async function createOrResumeMain(ctx: Context, agentPreset?: string): Promise<A
  * 不创建（消费方没有固定 workspace 时无权替它决定新 session 落在哪）。
  * 同理也不 mount preset：依赖 preset 组合的调用方自行传 `setup` 给 `resume`。
  */
-async function ensureExplicit(ctx: Context, sessionId: SessionId): Promise<Agent> {
+function ensureExplicit(ctx: Context, sessionId: SessionId): Promise<Agent> {
+  return singleFlight(ctx, sessionId, () => resumeExplicit(ctx, sessionId))
+}
+
+async function resumeExplicit(ctx: Context, sessionId: SessionId): Promise<Agent> {
   const live = ctx.agents.get(sessionId)
   if (live !== undefined) return live
 

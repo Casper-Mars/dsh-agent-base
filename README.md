@@ -77,6 +77,13 @@ interface AgentBaseService {
 }
 ```
 
+实际读取就是这两个属性：
+
+```ts
+const cwd = ctx.agentBase.workspaceCwd
+const id = ctx.agentBase.mainSessionId
+```
+
 - 两个值在构造后不可变（属性不可写、不可重配置）；
 - **没有** `ensure` / `deliver` / `bind` / `status`；
 - 不创建/恢复 Agent，不调用 `workspace.attachSession`；
@@ -192,7 +199,7 @@ const sessionId = explicitSessionId ?? ctx.agentBase.mainSessionId
 显式 sessionId ? 用显式值（不读 agentBase） : 读 ctx.agentBase
   → ctx.agents.get(mainSessionId) 命中 → 复用 live Agent
   → 未命中：ctx.sessionPersistence.stat(mainSessionId)
-      ├─ 有快照：校验 header.cwd === workspaceCwd → ctx.agents.resume({ resumeSessionId, agentOptions, setup })
+      ├─ 有快照：canonical 校验 header.cwd（realpath 归一）→ ctx.agents.resume({ resumeSessionId, agentOptions, setup })
       └─ 无快照：ctx.agents.create({ sessionId, meta: { cwd: workspaceCwd, agentPreset }, agentOptions, setup })
                 → workspaceRegistry.create(workspaceCwd).attachSession(mainSessionId)
   → agent.followup(createUserMessage({ content, source: { kind, deliveryId, ... } }))
@@ -201,14 +208,15 @@ const sessionId = explicitSessionId ?? ctx.agentBase.mainSessionId
 | 场景 | 参考实现的行为 |
 | --- | --- |
 | main 已在 live registry | 直接复用，不 resume、不 create |
-| 有持久化快照 | 先校验 `header.cwd`，再 `resume`（**必须带 `agentOptions`**，否则恢复出的 Agent 没有模型） |
+| 有持久化快照 | 先按 canonical 路径校验 `header.cwd`（字符串不等时 `realpath` 归一），再 `resume`（**必须带 `agentOptions`**，否则恢复出的 Agent 没有模型） |
 | 无持久化快照 | `create` 时把 `meta.cwd` 固定为 `workspaceCwd`，随后 `attachSession` 进固定 workspace |
 | 调用方给了显式 session | 只走显式分支，完全不读 `ctx.agentBase`；不存在时由调用方决定重建 |
 
 ### 由消费方决定、base 不提供的能力
 
-- **single-flight**：并发首次投递要在消费方做（示例用 `WeakMap<Context, Promise>` 缓存进行中的
-  ensure），否则两个 `create` 会有一个收到 already exists；
+- **single-flight**：并发首次投递要在消费方做（示例用 `WeakMap<Context, Map<SessionId, Promise>>`
+  缓存进行中的 ensure，**main 与显式 session 两条路径共用**），否则并发的 `create` / `resume`
+  会有一个收到 already exists；
 - **source / deliveryId**：消息来源与幂等键由消费方声明。示例通过合并扩展
   `MessageSourceMap` 定义自己的 `kind`，base 不认识也不校验任何来源；
 - **followup 还是 steer**：示例用 `followup` 排一个独立 turn；要插入当前 step 请改用 `agent.steer(...)`；
