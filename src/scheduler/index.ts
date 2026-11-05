@@ -1,9 +1,9 @@
 /**
  * 调度子模块公共出口。
  *
- * 本任务在契约（types）与 cron 内核之上追加 store / state / text 三个模块的
- * 公共面；runner / deliver / service / tools 等模块由后续任务补齐后在此追加。
- * 装配（mountScheduler）不在本模块，由插件 `apply` 在任务-07 接入。
+ * 本任务在契约（types）与 cron 内核之上追加 store / state / text / validate /
+ * runner / failure 的公共面；deliver / service / tools 等模块由后续任务补齐后
+ * 在此追加。装配（mountScheduler）不在本模块，由插件 `apply` 在任务-07 接入。
  */
 export type {
   Clock,
@@ -67,3 +67,48 @@ export {
   truncateText,
 } from './text.js'
 export type { RenderTextOptions } from './text.js'
+
+export {
+  ALLOWED_SCRIPT_EXTENSIONS,
+  TaskPathError,
+  resolveScriptPath,
+  validateScript,
+  validateScriptFile,
+  validateScriptShape,
+} from './validate.js'
+export type {
+  ScriptFileFs,
+  ScriptValidationDeps,
+  ScriptValidationResult,
+  TaskPathFailureKind,
+} from './validate.js'
+
+export {
+  DEFAULT_MAX_STDERR_BYTES,
+  DEFAULT_MAX_STDOUT_BYTES,
+  DEFAULT_TASK_TIMEOUT_MS,
+  KILL_GRACE_MS,
+  STDOUT_TRUNCATION_MARKER,
+  createNodeExecStrategy,
+  parseTaskOutput,
+  truncationDetail,
+} from './runner.js'
+export type { NodeExecStrategyOptions } from './runner.js'
+
+export {
+  KNOWN_FAILURE_KINDS,
+  buildFailureNotice,
+  describeFailure,
+  formatInTimeZone,
+  processFailure,
+  processSuccess,
+} from './failure.js'
+export type {
+  FailureLogger,
+  FailureNoticeInput,
+  FailureStatePort,
+  ProcessFailureDeps,
+  ProcessFailureResult,
+  ProcessSuccessDeps,
+  TaskFailureInput,
+} from './failure.js'
