@@ -50,12 +50,13 @@ function createFakeRegistry(): FakeRegistry {
   return { create }
 }
 
-/** 真实 Context：提供 `apply` 需要的三个服务（仅 registry 被实际读取）。 */
+/** 真实 Context：提供 `apply` 需要的三个服务（只读探测返回“不存在”）。 */
 function createCtx(registry: FixedWorkspaceRegistry): Context {
   const ctx = new Context()
   ctx.provide('workspaceRegistry' as never, registry as never)
-  ctx.provide('sessionPersistence' as never, {} as never)
-  ctx.provide('agents' as never, {} as never)
+  // 无 live/main session：apply 的校验步骤应直接通过，不影响本文件的 workspace 断言。
+  ctx.provide('sessionPersistence' as never, { stat: async () => undefined } as never)
+  ctx.provide('agents' as never, { get: () => undefined } as never)
   return ctx
 }
 

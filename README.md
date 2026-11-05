@@ -13,10 +13,10 @@
   workspace picker 里也不再出现「添加工作区」。这是 dsh 官方支持的组合级关闭方式。
 - 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents`）。
 
-当前版本（0.1.0）已实现**固定 workspace 的解析、注册与只读服务发布**：启动时按
-`config.workspace` 校验绝对路径 → `mkdir -p`（可选）→ `realpath` →
-`workspaceRegistry.create(canonical)`，随后发布只读的 `ctx.agentBase` service。
-仍未实现：main session 创建/恢复、`validateExistingMain` 校验。
+当前版本（0.1.0）已实现**固定 workspace 的解析、注册、已有 main session 校验与只读服务发布**：
+启动时按 `config.workspace` 校验绝对路径 → `mkdir -p`（可选）→ `realpath` →
+`workspaceRegistry.create(canonical)` → 校验同 id 的 main session 的 cwd 是否与之一致 →
+发布只读的 `ctx.agentBase` service。仍未实现：main session 创建/恢复。
 
 ### 启动序列
 
@@ -26,11 +26,45 @@ apply()
   ├─ createWorkspaceDir !== false → mkdir -p
   ├─ canonical = realpath(workspace)
   ├─ workspace = await workspaceRegistry.create(canonical)
+  ├─ validateExistingMain({ mainSessionId, workspaceCwd: workspace.path, validateExistingMain })
+  │    ├─ 开关为 false → 跳过（连 agents.get 都不调用）
+  │    ├─ agents.get(mainSessionId) 命中 → 比较 header.cwd（不再查持久化）
+  │    ├─ 未命中 → sessionPersistence.stat(mainSessionId)
+  │    │    ├─ undefined → 无该 session，通过
+  │    │    └─ 有快照 → 比较 header.cwd
+  │    └─ cwd 不一致 → AgentBaseWorkspaceMismatchError
   └─ new AgentBaseService(ctx, { workspaceCwd: workspace.path, mainSessionId })
 ```
 
+校验严格在 service 实例化**之前**完成：失败时不会留下已注册的 `ctx.agentBase`。
+
 固定目录只有一个来源：**插件配置**。不从进程 cwd、registry 首项或任何已有
 session 推断；失败时错误类型为 `AgentBaseConfigError`，信息中包含配置原值。
+
+### 校验已有 main session 的 cwd
+
+`validateExistingMain` 是**只读守卫**：它只回答「若 main session 已存在，它是否在
+固定 workspace 里」，不修复、不改投。
+
+- 不调用 `agents.create` / `agents.resume`；
+- 不调用 `workspace.attachSession`；
+- 不修改 session header（不改 cwd、不改绑 workspace）；
+- session 不存在时直接通过，**不**顺手创建。
+
+cwd 比较是 canonical 比较：字符串相等直接通过，否则对实际值 `realpath` 后比较；
+`realpath` 失败（路径已不存在）视为不匹配。因此历史 session 里的 symlink 拼写
+不会误报。
+
+错误模型（`src/errors.ts`，均继承 `AgentBaseError`）：
+
+| 类型 | 触发条件 | 结构化字段 |
+| --- | --- | --- |
+| `AgentBaseConfigError` | workspace 配置/目录准备失败 | `workspace`（配置原值） |
+| `AgentBaseWorkspaceMismatchError` | main session 的 cwd 与固定 workspace 不一致 | `mainSessionId` / `expectedCwd` / `actualCwd`（可能为 `undefined`） |
+| `AgentBaseValidationError` | 校验无法完成（例如 `stat` 抛错） | `mainSessionId` / `cause`（原始错误） |
+
+`AgentBaseWorkspaceMismatchError.message` 同时包含实际路径与期望路径（无 cwd 时显示
+`<none>`），便于直接从启动日志定位。
 
 ### 服务契约
 
@@ -47,6 +81,17 @@ interface AgentBaseService {
 - **没有** `ensure` / `deliver` / `bind` / `status`；
 - 不创建/恢复 Agent，不调用 `workspace.attachSession`；
 - 消费方自行创建/恢复 Agent，并自行决定 followup / steer。
+
+### 失败模式
+
+| 场景 | 结果 |
+| --- | --- |
+| `config.workspace` 为空/相对路径/不可访问 | 启动失败，`AgentBaseConfigError`（message 含配置原值） |
+| live 或 persisted main session 的 cwd 与固定 workspace 不一致 | 启动失败，`AgentBaseWorkspaceMismatchError`（message 含 actual 与 expected） |
+| `sessionPersistence.stat` 抛错 | 启动失败，`AgentBaseValidationError`（`cause` 为原始错误） |
+| 没有任何 main session | 启动通过，**不**创建 session |
+
+任何情况下都不会「静默改投」到别的 workspace，也不会把已有 session 改绑到固定 workspace。
 
 ### 关于默认 `/workspace`
 
@@ -116,6 +161,10 @@ dsh plugin --profile web remove dsh-agent-base
 | `mainSessionId` | 必填且非空，稳定 id，`[A-Za-z0-9._-]{1,64}` |
 | `createWorkspaceDir` | 目录不存在时是否创建，默认 `true` |
 | `validateExistingMain` | 已有同 id 会话的 cwd 不一致时是否启动失败，默认 `true` |
+
+`validateExistingMain: false` 会**完全跳过**校验（连 `agents.get` / `stat` 都不调用），
+已有 session 的 cwd 不一致也不会阻止启动。仅建议用于一次性排障，不建议用于生产：
+它会让 session 与固定 workspace 不一致的脏状态静默通过。
 
 ## Patch 分层说明
 

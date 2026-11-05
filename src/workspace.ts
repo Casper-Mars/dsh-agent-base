@@ -17,6 +17,7 @@ import { mkdir, realpath } from 'node:fs/promises'
 import path from 'node:path'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import type { Config } from './config.js'
+import { AgentBaseError } from './errors.js'
 
 /** `resolveFixedWorkspace` 需要读取的配置子集。 */
 export type ResolveFixedWorkspaceConfig = Pick<Config, 'workspace' | 'createWorkspaceDir'>
@@ -53,13 +54,15 @@ const defaultFs: FixedWorkspaceFs = {
  *
  * 所有「目录没准备好 / 路径不合法」的失败都归一到这个类型，`workspace`
  * 字段保留用户配置的原值，便于把原值写进日志和上层错误链。
+ *
+ * 继承 {@link AgentBaseError}，让 `apply` 能用一个判断把所有本插件的结构化
+ * 错误原样抛出，只包装真正未知的错误。
  */
-export class AgentBaseConfigError extends Error {
+export class AgentBaseConfigError extends AgentBaseError {
   readonly workspace: string
 
   constructor(message: string, workspace: string, options?: { cause?: unknown }) {
-    super(message, options === undefined ? undefined : { cause: options.cause })
-    this.name = 'AgentBaseConfigError'
+    super(message, options)
     this.workspace = workspace
   }
 }

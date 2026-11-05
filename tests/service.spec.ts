@@ -29,6 +29,8 @@ interface Spies {
   workspaceAttachSession: ReturnType<typeof vi.fn>
   agentCreate: ReturnType<typeof vi.fn>
   agentResume: ReturnType<typeof vi.fn>
+  agentGet: ReturnType<typeof vi.fn>
+  sessionStat: ReturnType<typeof vi.fn>
 }
 
 interface Harness {
@@ -43,6 +45,8 @@ function createHarness(): Harness {
     workspaceAttachSession: vi.fn(),
     agentCreate: vi.fn(),
     agentResume: vi.fn(),
+    agentGet: vi.fn(() => undefined),
+    sessionStat: vi.fn(async () => undefined),
   }
   const registryCreate = vi.fn(async (workspacePath: string): Promise<Workspace> => ({
     id: 'ws-1',
@@ -53,8 +57,9 @@ function createHarness(): Harness {
 
   const ctx = new Context()
   ctx.provide('workspaceRegistry' as never, { create: registryCreate } as never)
-  ctx.provide('sessionPersistence' as never, {} as never)
+  ctx.provide('sessionPersistence' as never, { stat: spies.sessionStat } as never)
   ctx.provide('agents' as never, {
+    get: spies.agentGet,
     create: spies.agentCreate,
     resume: spies.agentResume,
   } as never)
@@ -113,6 +118,9 @@ describe('AgentBaseService', () => {
     expect(spies.agentCreate).not.toHaveBeenCalled()
     expect(spies.agentResume).not.toHaveBeenCalled()
     expect(spies.workspaceAttachSession).not.toHaveBeenCalled()
+    // 无 main session 时仅做了只读探测，没有创建任何东西。
+    expect(spies.agentGet).toHaveBeenCalledWith('main')
+    expect(spies.sessionStat).toHaveBeenCalledWith('main')
   })
 
   it('owner fiber dispose 后 ctx.get("agentBase") 为 undefined', async () => {
