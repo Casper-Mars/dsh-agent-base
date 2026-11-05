@@ -142,3 +142,13 @@ export type {
 
 export { SchedulerService, createSchedulerService } from './service.js'
 export type { SchedulerLogger, SchedulerServiceOptions } from './service.js'
+
+export {
+  SCHEDULER_TOOL_NAMES,
+  SchedulerToolError,
+  createSchedulerTools,
+  toTaskView,
+  validateTaskCron,
+  validateTaskId,
+} from './tools.js'
+export type { SchedulerToolsOptions, TaskStoreLike, TaskView } from './tools.js'
