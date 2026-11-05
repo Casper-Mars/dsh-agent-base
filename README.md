@@ -166,6 +166,61 @@ dsh plugin --profile web remove dsh-agent-base
 已有 session 的 cwd 不一致也不会阻止启动。仅建议用于一次性排障，不建议用于生产：
 它会让 session 与固定 workspace 不一致的脏状态静默通过。
 
+## 消费方接入
+
+本包只发布 `ctx.agentBase` 的两个只读值（`workspaceCwd` / `mainSessionId`）。
+**base 不创建 main、不投递、不提供 `ensure`**：首个 main Agent、消息的 source 与
+幂等键、并发保护、`followup` 还是 `steer`，全部由消费方自己决定。
+
+### 读取顺序：显式 session 优先
+
+```ts
+// 调用方指定了 session 就直接用，不要读 agentBase。
+const sessionId = explicitSessionId ?? ctx.agentBase.mainSessionId
+```
+
+`ctx.agentBase` 只服务「没有指定 session」的场景（后台派单、定时任务、webhook 转投等）。
+显式 session 的 cwd、preset、生命周期由调用方自己负责。
+
+### `ensureMain` 参考实现
+
+完整可复制示例见 [`examples/ensure-main.ts`](./examples/ensure-main.ts)
+（**示例，不是本包导出**：未在 `package.json` 的 `exports` / `files` 中，也不进 `dist-server`）。
+它演示的链路：
+
+```text
+显式 sessionId ? 用显式值（不读 agentBase） : 读 ctx.agentBase
+  → ctx.agents.get(mainSessionId) 命中 → 复用 live Agent
+  → 未命中：ctx.sessionPersistence.stat(mainSessionId)
+      ├─ 有快照：校验 header.cwd === workspaceCwd → ctx.agents.resume({ resumeSessionId, agentOptions, setup })
+      └─ 无快照：ctx.agents.create({ sessionId, meta: { cwd: workspaceCwd, agentPreset }, agentOptions, setup })
+                → workspaceRegistry.create(workspaceCwd).attachSession(mainSessionId)
+  → agent.followup(createUserMessage({ content, source: { kind, deliveryId, ... } }))
+```
+
+| 场景 | 参考实现的行为 |
+| --- | --- |
+| main 已在 live registry | 直接复用，不 resume、不 create |
+| 有持久化快照 | 先校验 `header.cwd`，再 `resume`（**必须带 `agentOptions`**，否则恢复出的 Agent 没有模型） |
+| 无持久化快照 | `create` 时把 `meta.cwd` 固定为 `workspaceCwd`，随后 `attachSession` 进固定 workspace |
+| 调用方给了显式 session | 只走显式分支，完全不读 `ctx.agentBase`；不存在时由调用方决定重建 |
+
+### 由消费方决定、base 不提供的能力
+
+- **single-flight**：并发首次投递要在消费方做（示例用 `WeakMap<Context, Promise>` 缓存进行中的
+  ensure），否则两个 `create` 会有一个收到 already exists；
+- **source / deliveryId**：消息来源与幂等键由消费方声明。示例通过合并扩展
+  `MessageSourceMap` 定义自己的 `kind`，base 不认识也不校验任何来源；
+- **followup 还是 steer**：示例用 `followup` 排一个独立 turn；要插入当前 step 请改用 `agent.steer(...)`；
+- **handle 释放**：`create` / `resume` 返回的 `AgentHandle` 由调用方持有，示例用
+  `ctx.effect(() => () => handle.dispose())` 随插件 fiber 卸载释放；释放后再投递会走 `resume`，不会重复建会话。
+
+示例自身的类型检查：
+
+```bash
+pnpm typecheck:examples   # examples/**/*.ts，独立 tsconfig.examples.json，noEmit
+```
+
 ## Patch 分层说明
 
 bundle patch 叠加在 `@deepseek-ai/dsh-web-app` 之后，因此 `directory-picker` 行
