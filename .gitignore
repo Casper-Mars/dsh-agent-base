@@ -1,0 +1,17 @@
+# Logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# Dependency directories
+node_modules/
+
+# Build output
+dist/
+dist-server/
+
+# TypeScript cache
+*.tsbuildinfo
+
+# macOS
+.DS_Store

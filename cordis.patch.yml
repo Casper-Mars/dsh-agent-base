@@ -1,0 +1,20 @@
+# dsh-agent-base bundle patch —— 固定工作区 + main session id
+#
+# 仅用于 web profile：
+#   - 禁用 directory-picker（@deepseek-ai/dsh-host-directory-picker-auto），
+#     directory-flow 槽位没有 occupant 后，`Add workspace` 按钮与快捷键入口
+#     自动消失（官方支持的组合级关闭方式）；
+#   - 插入 agent-base 行，由 `dsh plugin --profile web add <本包>` 自动叠加。
+#
+# id/name/inject 必须与 src/index.ts 逐项一致。
+#
+# 注意：patch 分层语义下，上层 profile 仍可用 `disabled: false` 重新打开
+# directory-picker，这是 dsh 的设计，不是本插件能控制的。
+
+- id: directory-picker
+  disabled: true
+
+- insert:
+    - id: agent-base
+      name: dsh-agent-base
+      inject: ['workspaceRegistry', 'sessionPersistence', 'agents']

@@ -1,0 +1,6 @@
+packages:
+  - .
+
+# vitest 依赖 esbuild，需要允许其安装脚本（pnpm 11 默认拦截）。
+allowBuilds:
+  esbuild: true
