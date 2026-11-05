@@ -130,3 +130,15 @@ export type {
   NoticeMessageSource,
   NoticeUserMessage,
 } from './deliver.js'
+
+export { createCooldownStore, runTask } from './task.js'
+export type {
+  CooldownStore,
+  RunTaskDeps,
+  TaskDeliveryPort,
+  TaskLogger,
+  TaskStatePort,
+} from './task.js'
+
+export { SchedulerService, createSchedulerService } from './service.js'
+export type { SchedulerLogger, SchedulerServiceOptions } from './service.js'
