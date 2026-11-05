@@ -18,3 +18,8 @@
     - id: agent-base
       name: dsh-agent-base
       inject: ['workspaceRegistry', 'sessionPersistence', 'agents']
+      config:
+        workspace: /workspace
+        mainSessionId: main
+        createWorkspaceDir: true
+        validateExistingMain: true
