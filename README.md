@@ -13,11 +13,10 @@
   workspace picker 里也不再出现「添加工作区」。这是 dsh 官方支持的组合级关闭方式。
 - 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents`）。
 
-当前版本（0.1.0）已实现**固定 workspace 的解析与注册**：启动时按 `config.workspace`
-校验绝对路径 → `mkdir -p`（可选）→ `realpath` → `workspaceRegistry.create(canonical)`，
-并把 `{ workspace, workspaceCwd, mainSessionId }` 存入包内状态（供后续任务发布
-`ctx.agentBase` service）。仍未实现：`ctx.agentBase` service 发布、main session
-创建/恢复、`validateExistingMain` 校验。
+当前版本（0.1.0）已实现**固定 workspace 的解析、注册与只读服务发布**：启动时按
+`config.workspace` 校验绝对路径 → `mkdir -p`（可选）→ `realpath` →
+`workspaceRegistry.create(canonical)`，随后发布只读的 `ctx.agentBase` service。
+仍未实现：main session 创建/恢复、`validateExistingMain` 校验。
 
 ### 启动序列
 
@@ -27,11 +26,27 @@ apply()
   ├─ createWorkspaceDir !== false → mkdir -p
   ├─ canonical = realpath(workspace)
   ├─ workspace = await workspaceRegistry.create(canonical)
-  └─ 保存 { workspace, workspaceCwd: workspace.path, mainSessionId }
+  └─ new AgentBaseService(ctx, { workspaceCwd: workspace.path, mainSessionId })
 ```
 
 固定目录只有一个来源：**插件配置**。不从进程 cwd、registry 首项或任何已有
 session 推断；失败时错误类型为 `AgentBaseConfigError`，信息中包含配置原值。
+
+### 服务契约
+
+`apply` 成功后可在真实 Cordis `Context` 上读取 `ctx.agentBase`：
+
+```ts
+interface AgentBaseService {
+  readonly workspaceCwd: string
+  readonly mainSessionId: SessionId
+}
+```
+
+- 两个值在构造后不可变（属性不可写、不可重配置）；
+- **没有** `ensure` / `deliver` / `bind` / `status`；
+- 不创建/恢复 Agent，不调用 `workspace.attachSession`；
+- 消费方自行创建/恢复 Agent，并自行决定 followup / steer。
 
 ### 关于默认 `/workspace`
 

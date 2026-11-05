@@ -3,20 +3,21 @@
  *
  * 覆盖：相对路径、空值与空白、目录不存在（createWorkspaceDir 两种取值）、
  * 符号链接 canonical 化、同路径重复注册幂等、process.chdir 无关性、
- * `apply` 的错误包装与状态保存、Config schema 的 mainSessionId 非空约束。
+ * `apply` 的错误包装与服务发布、Config schema 的 mainSessionId 非空约束。
  *
- * 使用真实 `node:fs/promises` 与临时目录（mkdtemp + rm），fake registry 记录
- * registry 实际收到的路径；不引入 Cordis 运行时。
+ * `resolveFixedWorkspace` 使用真实 `node:fs/promises` 与临时目录
+ * （mkdtemp + rm），fake registry 记录 registry 实际收到的路径；
+ * `apply` 用例使用真实 Cordis `Context`，验证 `ctx.agentBase` 服务。
  */
 import { mkdir, mkdtemp, realpath, rm, symlink } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
+import { Context } from '@deepseek-ai/cordis'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import type { Workspace } from '@deepseek-ai/dsh-workspace'
 import { Config } from '../src/config.js'
 import type { Config as AgentBaseConfig } from '../src/config.js'
-import { apply } from '../src/index.js'
-import { getAgentBaseState } from '../src/state.js'
+import { AgentBaseService, apply } from '../src/index.js'
 import { AgentBaseConfigError, resolveFixedWorkspace } from '../src/workspace.js'
 import type { FixedWorkspaceRegistry } from '../src/workspace.js'
 
@@ -47,6 +48,15 @@ function createFakeRegistry(): FakeRegistry {
     return workspace
   })
   return { create }
+}
+
+/** 真实 Context：提供 `apply` 需要的三个服务（仅 registry 被实际读取）。 */
+function createCtx(registry: FixedWorkspaceRegistry): Context {
+  const ctx = new Context()
+  ctx.provide('workspaceRegistry' as never, registry as never)
+  ctx.provide('sessionPersistence' as never, {} as never)
+  ctx.provide('agents' as never, {} as never)
+  return ctx
 }
 
 const configOf = (overrides: Partial<AgentBaseConfig>): AgentBaseConfig => ({
@@ -161,34 +171,30 @@ describe('resolveFixedWorkspace', () => {
 })
 
 describe('apply', () => {
-  /** 最小 ctx stub：只提供 apply 需要的 workspaceRegistry。 */
-  const ctxWith = (registry: FixedWorkspaceRegistry): object => ({ workspaceRegistry: registry })
-
-  it('相对路径配置启动失败，错误包含原值', async () => {
+  it('相对路径配置启动失败，错误包含原值且不发布服务', async () => {
     const registry = createFakeRegistry()
-    const ctx = ctxWith(registry)
+    const ctx = createCtx(registry)
 
-    await expect(apply(ctx as never, configOf({ workspace: 'relative/ws' })))
+    await expect(apply(ctx, configOf({ workspace: 'relative/ws' })))
       .rejects.toThrow(/'relative\/ws'/)
-    expect(getAgentBaseState(ctx)).toBeUndefined()
+    expect(ctx.get('agentBase')).toBeUndefined()
   })
 
-  it('合法配置保存 canonical workspaceCwd 与 mainSessionId', async () => {
+  it('合法配置发布 ctx.agentBase，值为 canonical workspaceCwd 与配置 mainSessionId', async () => {
     const base = await makeTempDir()
     const target = path.join(base, 'ws')
     const registry = createFakeRegistry()
-    const ctx = ctxWith(registry)
+    const ctx = createCtx(registry)
 
-    await apply(ctx as never, configOf({ workspace: target, mainSessionId: 'main' }))
+    await apply(ctx, configOf({ workspace: target, mainSessionId: 'main' }))
 
-    const state = getAgentBaseState(ctx)
-    expect(state).toBeDefined()
-    expect(state?.workspaceCwd).toBe(await realpath(target))
-    expect(state?.workspace.path).toBe(await realpath(target))
-    expect(state?.mainSessionId).toBe('main')
+    const service = ctx.get('agentBase')
+    expect(service).toBeInstanceOf(AgentBaseService)
+    expect(service?.workspaceCwd).toBe(await realpath(target))
+    expect(service?.mainSessionId).toBe('main')
   })
 
-  it('registry 抛错被包装为 AgentBaseConfigError，message 含原配置路径', async () => {
+  it('registry 抛错被包装为 AgentBaseConfigError，message 含原配置路径且不发布服务', async () => {
     const base = await makeTempDir()
     const target = path.join(base, 'ws')
     await mkdir(target, { recursive: true })
@@ -197,13 +203,13 @@ describe('apply', () => {
         throw new Error('storage exploded')
       },
     }
-    const ctx = ctxWith(registry)
+    const ctx = createCtx(registry)
 
-    const promise = apply(ctx as never, configOf({ workspace: target }))
+    const promise = apply(ctx, configOf({ workspace: target }))
     await expect(promise).rejects.toBeInstanceOf(AgentBaseConfigError)
-    await expect(apply(ctx as never, configOf({ workspace: target })))
+    await expect(apply(ctx, configOf({ workspace: target })))
       .rejects.toThrow(/storage exploded/)
-    expect(getAgentBaseState(ctx)).toBeUndefined()
+    expect(ctx.get('agentBase')).toBeUndefined()
   })
 })
 
