@@ -112,3 +112,21 @@ export type {
   ProcessSuccessDeps,
   TaskFailureInput,
 } from './failure.js'
+
+export {
+  DEFAULT_MAX_PENDING_PER_TASK,
+  DEFAULT_PENDING_TTL_MS,
+  PRODUCER_KIND,
+  createDeliveryPort,
+  createNoticeMessage,
+} from './deliver.js'
+export type {
+  AgentBaseDeliveryPort,
+  CreateDeliveryPortOptions,
+  DeliveryAgentsLike,
+  DeliveryEventsLike,
+  DeliveryLogger,
+  DeliveryPersistenceLike,
+  NoticeMessageSource,
+  NoticeUserMessage,
+} from './deliver.js'
