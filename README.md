@@ -11,10 +11,39 @@
 - 禁用 `directory-picker`（`@deepseek-ai/dsh-host-directory-picker-auto`）：
   directory-flow 槽位没有 occupant 后，`Add workspace` 按钮和快捷键入口自动消失，
   workspace picker 里也不再出现「添加工作区」。这是 dsh 官方支持的组合级关闭方式。
-- 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents`），
-  后续任务将在此发布 `ctx.agentBase = { workspaceCwd, mainSessionId }`。
+- 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents`）。
 
-当前版本（0.1.0）仅包含骨架：`apply` 为空实现，无任何文件系统或会话副作用。
+当前版本（0.1.0）已实现**固定 workspace 的解析与注册**：启动时按 `config.workspace`
+校验绝对路径 → `mkdir -p`（可选）→ `realpath` → `workspaceRegistry.create(canonical)`，
+并把 `{ workspace, workspaceCwd, mainSessionId }` 存入包内状态（供后续任务发布
+`ctx.agentBase` service）。仍未实现：`ctx.agentBase` service 发布、main session
+创建/恢复、`validateExistingMain` 校验。
+
+### 启动序列
+
+```text
+apply()
+  ├─ 校验 config.workspace 为非空绝对路径（相对路径直接拒绝）
+  ├─ createWorkspaceDir !== false → mkdir -p
+  ├─ canonical = realpath(workspace)
+  ├─ workspace = await workspaceRegistry.create(canonical)
+  └─ 保存 { workspace, workspaceCwd: workspace.path, mainSessionId }
+```
+
+固定目录只有一个来源：**插件配置**。不从进程 cwd、registry 首项或任何已有
+session 推断；失败时错误类型为 `AgentBaseConfigError`，信息中包含配置原值。
+
+### 关于默认 `/workspace`
+
+`cordis.patch.yml` 中的默认 `workspace: /workspace` 面向**容器部署**（容器内根目录可写，
+部署仓会挂载该路径）。在本机直接 boot 时 `/workspace` 通常不存在且根目录只读，
+启动会报错——这是部署契约而非插件缺陷。本机验证请用 profile patch 覆盖：
+
+```yaml
+- id: agent-base
+  config:
+    workspace: /tmp/dsh-agent-base-ws
+```
 
 ## 构建
 
@@ -62,8 +91,8 @@ dsh plugin --profile web remove dsh-agent-base
 
 | 字段 | 说明 |
 | --- | --- |
-| `workspace` | 必填，固定工作区绝对路径 |
-| `mainSessionId` | 必填，稳定 id，建议 `[A-Za-z0-9._-]{1,64}` |
+| `workspace` | 必填，固定工作区绝对路径（相对路径启动失败）；不存在时按 `createWorkspaceDir` 创建 |
+| `mainSessionId` | 必填且非空，稳定 id，`[A-Za-z0-9._-]{1,64}` |
 | `createWorkspaceDir` | 目录不存在时是否创建，默认 `true` |
 | `validateExistingMain` | 已有同 id 会话的 cwd 不一致时是否启动失败，默认 `true` |
 
@@ -86,6 +115,17 @@ TMPHOME=$(mktemp -d)
 mkdir -p "$TMPHOME/profiles"
 cp -R ~/.dsh/profiles/web "$TMPHOME/profiles/web"
 DSH_HOME="$TMPHOME" dsh plugin --profile web add "$PWD"
-DSH_HOME="$TMPHOME" dsh --profile web --dump-config | grep -A3 -E 'id: agent-base|id: directory-picker'
+
+# 本机验证：覆盖默认 /workspace 为可写临时目录
+cat >> "$TMPHOME/profiles/web/cordis.patch.yml" <<'YAML'
+- id: agent-base
+  config:
+    workspace: /tmp/dsh-agent-base-ws-it
+YAML
+
+DSH_HOME="$TMPHOME" dsh --profile web --dump-config | grep -A4 -E 'id: agent-base|id: directory-picker'
+timeout 12 env DSH_HOME="$TMPHOME" dsh --profile web --no-open   # 观察启动日志
+
 DSH_HOME="$TMPHOME" dsh plugin --profile web remove dsh-agent-base
+rm -rf "$TMPHOME" /tmp/dsh-agent-base-ws-it
 ```
