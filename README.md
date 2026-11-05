@@ -43,7 +43,13 @@ session 推断；失败时错误类型为 `AgentBaseConfigError`，信息中包�
 - id: agent-base
   config:
     workspace: /tmp/dsh-agent-base-ws
+    mainSessionId: main
+    createWorkspaceDir: true
+    validateExistingMain: true
 ```
+
+注意：profile 层的 `config` 是**整体替换**而非深合并，覆盖时必须写全四个字段，
+否则未写字段会变成缺失（例如 `mainSessionId missing required value`）。
 
 ## 构建
 
@@ -121,6 +127,9 @@ cat >> "$TMPHOME/profiles/web/cordis.patch.yml" <<'YAML'
 - id: agent-base
   config:
     workspace: /tmp/dsh-agent-base-ws-it
+    mainSessionId: main
+    createWorkspaceDir: true
+    validateExistingMain: true
 YAML
 
 DSH_HOME="$TMPHOME" dsh --profile web --dump-config | grep -A4 -E 'id: agent-base|id: directory-picker'
