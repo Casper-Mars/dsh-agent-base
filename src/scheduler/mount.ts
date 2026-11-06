@@ -62,15 +62,26 @@ function consoleLogger(): MountLogger {
   }
 }
 
-/** 把任意日志方法包成「永不抛」的调用；非函数则退化为无操作。 */
-function guardedLoggerMethod(
+/**
+ * 把任意日志方法包成「永不抛」的调用；非函数则退化为无操作。
+ *
+ * 实参个数与入参严格对齐：`meta === undefined` 时只传 `message`。这对基于
+ * `util.format` 的控制台 logger 很关键——多传一个 `undefined` 会让每条日志
+ * 末尾多出 ` undefined`。需要直接单测，故以具名导出暴露（未进入包入口）。
+ */
+export function guardedLoggerMethod(
   method: unknown,
   receiver: unknown,
 ): (message: string, meta?: unknown) => void {
   if (typeof method !== 'function') return () => {}
   return (message, meta) => {
     try {
-      ;(method as (message: string, meta?: unknown) => void).call(receiver, message, meta)
+      const target = method as (message: string, meta?: unknown) => void
+      if (meta === undefined) {
+        target.call(receiver, message)
+      } else {
+        target.call(receiver, message, meta)
+      }
     } catch {
       // 日志出口自身异常不允许影响装配与运行。
     }

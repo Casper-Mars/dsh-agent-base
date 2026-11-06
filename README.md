@@ -142,19 +142,31 @@ pnpm build
 
 ## 安装到 web profile
 
+> **本地路径安装不装依赖**：`dsh plugin add <本地路径>` 采用 link 方式，只把
+> 本包链进 profile，**不会**把本包的 `dependencies` 装进 profile。因此本地安装前
+> 必须先在仓库内完成 `pnpm install && pnpm build`——运行期 `logger-console`
+> 等依赖解析到的是本仓库自己的 `node_modules`，仓库没装依赖就会缺包。
+> 通过 npm 安装（`dsh plugin add dsh-agent-base`）时依赖由 registry 自动安装，
+> 无需这一步。
+
 ```bash
+# 本地路径安装：先在本仓库装依赖并构建
+pnpm install && pnpm build
+
 dsh plugin --profile web add /Users/reachlucifer/project/opc/dsh-agent-base
-# 或发布后：dsh plugin --profile web add dsh-agent-base
+# 或发布后（依赖自动安装）：dsh plugin --profile web add dsh-agent-base
 ```
 
 安装后由 `@deepseek-ai/dsh-plugin-manager` 自动把 `dsh-agent-base` 写入
 profile `package.json` 的 `dsh.profile.bundles`，无需手工编辑
 `$DSH_HOME/profiles/web/cordis.patch.yml`。
 
-安装后**自动启用 `logger-console`**（`@deepseek-ai/cordis-plugin-logger-console`，
-`levels.default: 3`，INFO / WARN / ERROR 输出到终端），不需要再改 profile 就能看到
-启动与调度日志。该行按 id 分层覆盖：profile 已有同 id 行时以 profile 为准、不会重复输出；
-如需自定义格式或关闭，在 profile 的 `cordis.patch.yml` 写一行同 id 配置或 `disabled: true`。
+安装后**自动启用 `logger-console`**（`@deepseek-ai/cordis-plugin-logger-console`
+`~1.0.x`，peer 要求 `@deepseek-ai/cordis ~4.0.5`，与本包 peer 一致；
+`levels.default: 3` = DEBUG 阈值），**INFO / WARN / ERROR / DEBUG 均输出到终端**
+（DEBUG 含逐任务排定明细），不需要再改 profile 就能看到启动与调度日志。该行按 id
+分层覆盖：profile 已有同 id 行时以 profile 为准、不会重复输出；如需自定义格式或关闭，
+在 profile 的 `cordis.patch.yml` 写一行同 id 配置或 `disabled: true`。
 
 ## 卸载
 
