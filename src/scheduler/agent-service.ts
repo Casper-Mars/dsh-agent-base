@@ -45,6 +45,11 @@ export class AgentSchedulerService extends Service {
     return this[SCHEDULER].isRunning(id)
   }
 
+  /** 某任务下一次触发时刻；未排定（禁用 / cron 非法 / 不存在）返回 `undefined`。 */
+  nextRunAt(id: string): Date | undefined {
+    return this[SCHEDULER].nextRunAt(id)
+  }
+
   /** 立即执行一次（与定时触发共用单飞锁）。 */
   runNow(id: string): Promise<TaskRunOutcome> {
     return this[SCHEDULER].runNow(id)

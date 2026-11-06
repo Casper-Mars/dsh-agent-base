@@ -99,22 +99,33 @@ export class FakeTimer implements Timer {
   }
 }
 
-/** 日志收集器（info / warn / error 全部进同一个数组）。 */
+/** 日志级别。 */
+export type CapturedLogLevel = 'info' | 'warn' | 'error' | 'debug'
+
+/** 日志收集器（info / warn / error / debug 全部进同一个数组，另按级别留痕）。 */
 export interface CapturedLogger {
   readonly lines: string[]
+  readonly entries: Array<{ readonly level: CapturedLogLevel; readonly message: string }>
   readonly logger: {
     info(message: string, meta?: unknown): void
     warn(message: string, meta?: unknown): void
     error(message: string, meta?: unknown): void
+    debug(message: string, meta?: unknown): void
   }
 }
 
 export function captureLogger(): CapturedLogger {
   const lines: string[] = []
-  const push = (message: string): void => {
+  const entries: Array<{ level: CapturedLogLevel; message: string }> = []
+  const at = (level: CapturedLogLevel) => (message: string): void => {
     lines.push(message)
+    entries.push({ level, message })
   }
-  return { lines, logger: { info: push, warn: push, error: push } }
+  return {
+    lines,
+    entries,
+    logger: { info: at('info'), warn: at('warn'), error: at('error'), debug: at('debug') },
+  }
 }
 
 /** 投递替身：默认目标 main、投递成功、失败通知成功。 */

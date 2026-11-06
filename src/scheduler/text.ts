@@ -127,6 +127,16 @@ function wallClockOf(timezone: string, now: Date): WallClock {
 }
 
 /**
+ * 目标时区下带偏移的 ISO 8601（秒级）。
+ *
+ * 调度日志里的「下次触发」必须与 cron 使用同一时区，否则跨时区部署时日志与
+ * 实际触发时刻会差几个小时。无法计算时区时抛错，由调用方决定兜底格式。
+ */
+export function formatIsoInZone(date: Date, timezone: string): string {
+  return wallClockOf(timezone, date).iso
+}
+
+/**
  * 展开文本任务占位符（§4.2 的 7 个）。
  *
  *   `{{date}}` `{{time}}` `{{datetime}}` `{{iso}}`

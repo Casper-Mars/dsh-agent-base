@@ -13,7 +13,8 @@
  *
  * 临时目录全部通过 mkdtemp 创建并在 afterEach 清理；不真实 sleep、不起子进程。
  */
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { statSync } from 'node:fs'
+import { chmod, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
@@ -119,6 +120,28 @@ function overrideLogger(ctx: Context, value: unknown): () => void {
     } else {
       Object.defineProperty(ctx, 'logger', descriptor)
     }
+  }
+}
+
+interface MountLogCapture {
+  readonly lines: string[]
+  readonly logger: {
+    info(message: string): void
+    warn(message: string): void
+    error(message: string): void
+    debug(message: string): void
+  }
+}
+
+/** 记录级别 + 文本的 mount logger 替身（用于断言启动日志）。 */
+function captureMountLogger(): MountLogCapture {
+  const lines: string[] = []
+  const at = (level: string) => (message: string): void => {
+    lines.push(`${level}:${message}`)
+  }
+  return {
+    lines,
+    logger: { info: at('info'), warn: at('warn'), error: at('error'), debug: at('debug') },
   }
 }
 
@@ -358,7 +381,7 @@ describe('mountScheduler', () => {
     expect(vi.getTimerCount()).toBe(1)
   })
 
-  it('ctx.logger 调用抛错且 enabled=false 时：apply resolve，logger 不被调用，零注册零 timer', async () => {
+  it('ctx.logger 调用抛错且 enabled=false 时：apply resolve，仍尝试记录禁用日志，零注册零 timer', async () => {
     const workspace = await makeWorkspace()
     await writeTask(workspace, textTask())
     const { ctx, tools } = createHarness()
@@ -378,9 +401,211 @@ describe('mountScheduler', () => {
 
     expect(ctx.get('agentBase')).toBeDefined()
     expect(ctx.get('agentScheduler')).toBeUndefined()
-    expect(loggerCalls).toBe(0)
+    expect(loggerCalls).toBeGreaterThan(0)
     expect(tools.register).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('启动成功后 info 记录任务目录、时区与「已排定/禁用/损坏」计数', async () => {
+    const workspace = await makeWorkspace()
+    await writeTask(workspace, textTask())
+    await writeTask(workspace, textTask({ id: 'off', enabled: false }))
+    const tasksDir = path.join(await realpath(workspace), '.agent-base', 'tasks')
+    await writeFile(path.join(tasksDir, 'broken.json'), '{ not json', 'utf8')
+    const { ctx } = createHarness({ tools: false })
+    const capture = captureMountLogger()
+    const restore = overrideLogger(ctx, () => capture.logger)
+
+    try {
+      await apply(ctx, configOf(workspace, { timezone: 'UTC' }))
+    } finally {
+      restore()
+    }
+
+    const startup = capture.lines.find((line) => line.startsWith('info:调度器已启动'))
+    expect(startup).toBe(
+      `info:调度器已启动：任务目录=${tasksDir}，时区=UTC，` +
+        '已排定 1 个任务（禁用 1，损坏 1）',
+    )
+  })
+
+  it('任务目录不存在时 warn（含绝对路径与创建提示），启动不崩', async () => {
+    const workspace = await makeWorkspace()
+    const tasksDir = path.join(await realpath(workspace), '.agent-base', 'tasks')
+    const { ctx } = createHarness({ tools: false })
+    const capture = captureMountLogger()
+    const restore = overrideLogger(ctx, () => capture.logger)
+
+    try {
+      await expect(apply(ctx, configOf(workspace))).resolves.toBeUndefined()
+    } finally {
+      restore()
+    }
+
+    expect(capture.lines).toContain(
+      `warn:任务目录不存在：${tasksDir}（首次使用请创建，或用 task_create 新建任务）`,
+    )
+    expect(ctx.agentScheduler.scheduledIds).toEqual([])
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('任务目录存在但为空时 warn', async () => {
+    const workspace = await makeWorkspace()
+    const tasksDir = path.join(await realpath(workspace), '.agent-base', 'tasks')
+    await mkdir(tasksDir, { recursive: true })
+    const { ctx } = createHarness({ tools: false })
+    const capture = captureMountLogger()
+    const restore = overrideLogger(ctx, () => capture.logger)
+
+    try {
+      await apply(ctx, configOf(workspace))
+    } finally {
+      restore()
+    }
+
+    expect(capture.lines).toContain(`warn:任务目录为空：${tasksDir}，当前没有可调度任务`)
+  })
+
+  it('tasksDir 被普通文件占用时 warn「不是目录」，装配继续', async () => {
+    const workspace = await makeWorkspace()
+    const baseDir = path.join(await realpath(workspace), '.agent-base')
+    const tasksDir = path.join(baseDir, 'tasks')
+    await mkdir(baseDir, { recursive: true })
+    await writeFile(tasksDir, 'not a directory', 'utf8')
+    const { ctx } = createHarness({ tools: false })
+    const capture = captureMountLogger()
+    const restore = overrideLogger(ctx, () => capture.logger)
+
+    try {
+      await expect(apply(ctx, configOf(workspace))).resolves.toBeUndefined()
+    } finally {
+      restore()
+    }
+
+    expect(capture.lines).toContain(
+      `warn:任务目录不是目录：${tasksDir}（该路径被文件占用，无法作为 tasksDir）`,
+    )
+    // 不得误报「不存在」或「为空」。
+    expect(capture.lines.some((line) => line.includes('任务目录不存在：'))).toBe(false)
+    expect(capture.lines.some((line) => line.includes('任务目录为空：'))).toBe(false)
+    expect(ctx.agentScheduler).toBeDefined()
+    expect(ctx.agentScheduler.scheduledIds).toEqual([])
+  })
+
+  it('tasksDir 不可访问（EACCES）时 warn「不可访问」，装配继续', async () => {
+    const workspace = await makeWorkspace()
+    const baseDir = path.join(await realpath(workspace), '.agent-base')
+    const tasksDir = path.join(baseDir, 'tasks')
+    await mkdir(tasksDir, { recursive: true })
+    // 去掉父目录的 x 权限，使 stat(tasks) 抛 EACCES；root 下不会生效。
+    await chmod(baseDir, 0o000)
+    let denied = false
+    try {
+      denied = (() => {
+        try {
+          statSync(tasksDir)
+          return false
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === 'EACCES'
+        }
+      })()
+      if (!denied) return // 以 root 运行时无法模拟 EACCES，跳过断言。
+
+      const { ctx } = createHarness({ tools: false })
+      const capture = captureMountLogger()
+      const restore = overrideLogger(ctx, () => capture.logger)
+      try {
+        await expect(apply(ctx, configOf(workspace))).resolves.toBeUndefined()
+      } finally {
+        restore()
+      }
+
+      expect(
+        capture.lines.some((line) =>
+          line.startsWith(`warn:任务目录不可访问：${tasksDir}：`),
+        ),
+      ).toBe(true)
+      expect(ctx.agentScheduler).toBeDefined()
+    } finally {
+      await chmod(baseDir, 0o700)
+    }
+  })
+
+  it('enabled=false 时记录「调度已禁用」且零工具零 timer', async () => {
+    const workspace = await makeWorkspace()
+    await writeTask(workspace, textTask())
+    const { ctx, tools } = createHarness()
+    const capture = captureMountLogger()
+    const restore = overrideLogger(ctx, () => capture.logger)
+
+    try {
+      await apply(ctx, configOf(workspace, { enabled: false }))
+    } finally {
+      restore()
+    }
+
+    expect(capture.lines).toContain('info:调度已禁用（scheduler.enabled=false）')
+    expect(ctx.get('agentScheduler')).toBeUndefined()
+    expect(tools.register).not.toHaveBeenCalled()
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('logger 三种可用形态（工厂返回对象 / 工厂返回函数 / 非可调用对象）都生效', async () => {
+    const cases: Array<[string, (capture: MountLogCapture) => unknown]> = [
+      ['工厂返回对象', (capture) => () => capture.logger],
+      ['工厂返回函数', (capture) => () => (message: string) => capture.lines.push(`fn:${message}`)],
+      ['非可调用对象', (capture) => capture.logger],
+    ]
+
+    for (const [label, build] of cases) {
+      const workspace = await makeWorkspace()
+      await writeTask(workspace, textTask())
+      const { ctx } = createHarness({ tools: false })
+      const capture = captureMountLogger()
+      const restore = overrideLogger(ctx, build(capture))
+
+      try {
+        await apply(ctx, configOf(workspace, { timezone: 'UTC' }))
+      } finally {
+        restore()
+      }
+
+      expect(capture.lines.some((line) => line.includes('调度器已启动')), label).toBe(true)
+      expect(capture.lines.some((line) => line.includes('任务 demo 已排定')), label).toBe(true)
+    }
+  })
+
+  it('logger 完全不可用时 warn 回落 console.warn，不阻断装配', async () => {
+    const workspace = await makeWorkspace()
+    const { ctx } = createHarness({ tools: false })
+    const restore = overrideLogger(ctx, () => ({ level: 'warn' }))
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+
+    try {
+      await expect(apply(ctx, configOf(workspace))).resolves.toBeUndefined()
+      expect(warn).toHaveBeenCalled()
+      expect(
+        warn.mock.calls.some((call) => String(call[0]).includes('任务目录不存在：')),
+      ).toBe(true)
+    } finally {
+      warn.mockRestore()
+      restore()
+    }
+  })
+
+  it('nextRunAt 命中已排定任务，未排定 / 不存在返回 undefined', async () => {
+    const workspace = await makeWorkspace()
+    await writeTask(workspace, textTask())
+    await writeTask(workspace, textTask({ id: 'off', enabled: false }))
+    const { ctx } = createHarness({ tools: false })
+
+    await apply(ctx, configOf(workspace, { timezone: 'UTC' }))
+
+    const next = ctx.agentScheduler.nextRunAt('demo')
+    expect(next).toBeInstanceOf(Date)
+    expect(next?.getTime()).toBeGreaterThan(Date.now())
+    expect(ctx.agentScheduler.nextRunAt('off')).toBeUndefined()
+    expect(ctx.agentScheduler.nextRunAt('missing')).toBeUndefined()
   })
 
   const loggerShapes: Array<[string, unknown]> = [

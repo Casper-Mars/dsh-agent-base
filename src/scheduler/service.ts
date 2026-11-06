@@ -29,11 +29,11 @@ import { createStateStore, defaultStatePath } from './state.js'
 import type { TaskStatus } from './state.js'
 import type { TaskStore } from './store.js'
 import { createCooldownStore, runTask } from './task.js'
+import { formatIsoInZone } from './text.js'
 import type {
   CooldownStore,
   RunTaskDeps,
   TaskDeliveryPort,
-  TaskLogger,
   TaskStatePort,
 } from './task.js'
 import type {
@@ -48,23 +48,36 @@ import type {
 /** `setTimeout` 允许的最大延时（2^31-1ms，约 24.8 天）。 */
 const MAX_TIMER_DELAY_MS = 2_147_483_647
 
-/** 日志出口（与 task 层同一形态）。 */
-export type SchedulerLogger = TaskLogger
+/** 日志出口：与 task 层同形态，额外支持可选的 `debug`。 */
+export type SchedulerLogger =
+  | {
+      info?(message: string, meta?: unknown): void
+      warn?(message: string, meta?: unknown): void
+      error?(message: string, meta?: unknown): void
+      debug?(message: string, meta?: unknown): void
+    }
+  | ((message: string, meta?: unknown) => void)
 
 interface NormalizedLogger {
   readonly info: (message: string, meta?: unknown) => void
   readonly warn: (message: string, meta?: unknown) => void
   readonly error: (message: string, meta?: unknown) => void
+  readonly debug: (message: string, meta?: unknown) => void
 }
 
 /** 归一化日志出口；未注入时全部为无操作。 */
 function loggerOf(logger: SchedulerLogger | undefined): NormalizedLogger {
-  if (logger === undefined) return { info: () => {}, warn: () => {}, error: () => {} }
-  if (typeof logger === 'function') return { info: logger, warn: logger, error: logger }
+  if (logger === undefined) {
+    return { info: () => {}, warn: () => {}, error: () => {}, debug: () => {} }
+  }
+  if (typeof logger === 'function') {
+    return { info: logger, warn: logger, error: logger, debug: logger }
+  }
   return {
     info: (message, meta) => logger.info?.(message, meta),
     warn: (message, meta) => logger.warn?.(message, meta),
     error: (message, meta) => logger.error?.(message, meta),
+    debug: (message, meta) => logger.debug?.(message, meta),
   }
 }
 
@@ -124,6 +137,20 @@ export interface SchedulerServiceOptions {
   readonly maxStderrBytes?: number
   /** 触发期文件校验（测试注入）。 */
   readonly validate?: RunTaskDeps['validate']
+}
+
+/** 一次任务清单加载的统计（启动日志与诊断用）。 */
+export interface SchedulerLoadStats {
+  /** 有效任务总数（不含损坏文件）。 */
+  readonly total: number
+  /** 声明为启用的任务数。 */
+  readonly enabled: number
+  /** 声明为禁用的任务数。 */
+  readonly disabled: number
+  /** 损坏 / 结构非法的任务文件数。 */
+  readonly corrupted: number
+  /** 实际排定成功（已装 timer）的任务数。 */
+  readonly scheduled: number
 }
 
 /** 已排定的任务（每个 id 一条链）。 */
@@ -224,11 +251,21 @@ export class SchedulerService {
     return [...this.scheduled.keys()].sort()
   }
 
-  /** 启动调度（幂等）。 */
-  start(): void {
-    if (this.started) return
+  /**
+   * 某任务下一次触发时刻；未排定（禁用 / cron 非法 / 不存在）返回 `undefined`。
+   *
+   * 只读诊断用：取自当前 timer 的目标时刻，不触发重算，也不改变调度状态。
+   */
+  nextRunAt(taskId: string): Date | undefined {
+    const entry = this.scheduled.get(taskId)
+    return entry === undefined ? undefined : new Date(entry.nextAtMs)
+  }
+
+  /** 启动调度（幂等）；返回本次清单加载统计。 */
+  start(): SchedulerLoadStats {
+    if (this.started) return this.stats()
     this.started = true
-    this.rebuild()
+    return this.rebuild()
   }
 
   /**
@@ -287,7 +324,8 @@ export class SchedulerService {
         detail: '单飞锁已占用：本次不排队',
       }
       this.outcomes.set(taskId, skipped)
-      this.log.warn(`任务 ${taskId} 已在执行中，本次触发跳过`)
+      // 与其它结局同走 logOutcome，保证 `结局：skipped — reason` 格式统一且只打一条。
+      this.logOutcome(taskId, skipped)
       return Promise.resolve(skipped)
     }
 
@@ -356,7 +394,21 @@ export class SchedulerService {
   }
 
   private logOutcome(taskId: string, outcome: TaskRunOutcome): void {
-    this.log.info(`任务 ${taskId} 结局：${outcome.kind}`, { taskId })
+    const base = `任务 ${taskId} 结局：${outcome.kind} — ${outcome.reason}`
+    if (outcome.kind === 'failed') {
+      this.log.warn(`${base}（failureKind=${outcome.failureKind}）`, { taskId })
+      return
+    }
+    if (outcome.kind === 'skipped') {
+      this.log.warn(base, { taskId })
+      return
+    }
+    this.log.info(base, { taskId })
+  }
+
+  /** 当前清单统计（未启动时为全零）。 */
+  private stats(): SchedulerLoadStats {
+    return { total: 0, enabled: 0, disabled: 0, corrupted: 0, scheduled: this.scheduled.size }
   }
 
   /** 清空全部 timer；`clearInFlight` 决定是否同时释放单飞锁。 */
@@ -377,13 +429,13 @@ export class SchedulerService {
   }
 
   /** 读取任务清单并逐条装配；清单读取失败只 warn。 */
-  private rebuild(): void {
+  private rebuild(): SchedulerLoadStats {
     let listed: { tasks: TaskDef[]; corrupted: string[] }
     try {
       listed = this.store.list()
     } catch (error) {
       this.log.warn(`读取任务清单失败（本轮跳过）：${describeError(error)}`)
-      return
+      return this.stats()
     }
 
     if (listed.corrupted.length > 0) {
@@ -393,18 +445,39 @@ export class SchedulerService {
     }
 
     for (const task of listed.tasks) this.scheduleTask(task)
+
+    const total = listed.tasks.length
+    const enabled = listed.tasks.filter((task) => task.enabled).length
+    const disabled = total - enabled
+    const stats: SchedulerLoadStats = {
+      total,
+      enabled,
+      disabled,
+      corrupted: listed.corrupted.length,
+      scheduled: this.scheduled.size,
+    }
+    this.log.info(
+      `任务清单加载完成：共 ${stats.total}，启用 ${stats.enabled}，禁用 ${stats.disabled}，损坏 ${stats.corrupted}`,
+    )
+    return stats
   }
 
   /** 单任务装配：禁用 / cron 非法 / 装配异常都只影响该任务。 */
   private scheduleTask(task: TaskDef): void {
     try {
-      if (!task.enabled) return
+      if (!task.enabled) {
+        this.log.debug(`任务 ${task.id} 已禁用，跳过调度`)
+        return
+      }
       if (!isValidCron(task.cron)) {
         this.log.warn(`任务 ${task.id} cron 非法（${JSON.stringify(task.cron)}），已跳过`)
         return
       }
       const schedule = parseCron(task.cron)
-      this.arm(task.id, schedule)
+      const nextAtMs = this.arm(task.id, schedule)
+      this.log.debug(
+        `任务 ${task.id} 已排定：下次触发 ${this.describeNextRun(nextAtMs)}（cron=${task.cron}）`,
+      )
     } catch (error) {
       // 装配失败：清掉可能已装的半成品句柄，保证不留下「跑不了也停不掉」的 timer。
       this.disarm(task.id)
@@ -431,7 +504,7 @@ export class SchedulerService {
    * 延时按「当前时钟 → 下一次 cron 时刻」计算；超过 `setTimeout` 上限时截到
    * 上限并记录目标时刻，提前醒来由 {@link fire} 判断是否只重装。
    */
-  private arm(taskId: string, schedule: CronSchedule): void {
+  private arm(taskId: string, schedule: CronSchedule): number {
     this.disarm(taskId)
 
     const now = this.clock.now()
@@ -443,6 +516,17 @@ export class SchedulerService {
     })
     this.liveTimers.add(handle)
     this.scheduled.set(taskId, { schedule, nextAtMs: targetMs, handle })
+    return targetMs
+  }
+
+  /** 下次触发时刻的日志文本；时区非法时退回 UTC ISO，日志不得影响调度。 */
+  private describeNextRun(targetMs: number): string {
+    const date = new Date(targetMs)
+    try {
+      return formatIsoInZone(date, this.timezone)
+    } catch {
+      return date.toISOString()
+    }
   }
 
   /**

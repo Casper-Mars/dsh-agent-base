@@ -16,6 +16,7 @@
  *   - 工具重名 / 单个注册失败：warn + 回滚已注册项，不阻断调度；
  *   - teardown 绑定失败：warn（生命周期兜底能力缺失，但不影响本次运行）。
  */
+import { statSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
 import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 // 仅加载 `agent/created` 事件的模块增强；调度装配只读事件。
@@ -45,12 +46,20 @@ interface MountLogger {
   debug(message: string, meta?: unknown): void
 }
 
-/** 日志能力缺失时的兜底出口。 */
-const NOOP_LOGGER: MountLogger = {
-  info: () => {},
-  warn: () => {},
-  error: () => {},
-  debug: () => {},
+/** 日志能力缺失时的兜底出口（warn / error 走 console，info / debug 静默）。 */
+function consoleLogger(): MountLogger {
+  return {
+    info: () => {},
+    debug: () => {},
+    warn: guardedLoggerMethod(
+      typeof console.warn === 'function' ? console.warn : undefined,
+      console,
+    ),
+    error: guardedLoggerMethod(
+      typeof console.error === 'function' ? console.error : undefined,
+      console,
+    ),
+  }
 }
 
 /** 把任意日志方法包成「永不抛」的调用；非函数则退化为无操作。 */
@@ -69,28 +78,92 @@ function guardedLoggerMethod(
 }
 
 /**
- * 获取 mount 日志出口。
+ * 从任意候选值提取日志出口；不可用返回 `undefined`。
  *
- * 优先 `ctx.logger('agent-base:scheduler')`；logger 服务缺失、不是函数、调用抛错
- * 或返回形状不可用时，回落到 {@link NOOP_LOGGER}。返回对象的每个方法都做了异常
- * 隔离，保证后续 `log.warn(...)` 在任何情况下都不会抛给 `apply`。
+ * 支持三种形态（按顺序在 {@link resolveMountLogger} 中尝试）：
+ *   - 普通对象，带 `info` / `warn` / `error` / `debug` 中的任意方法；
+ *   - 函数（可调用 logger），方法属性优先，缺失级别直接用函数本身；
+ *   - 其它 → 不可用。
+ *
+ * 缺失的级别退化为无操作；所有方法都做异常隔离，绝不向上抛。
+ */
+function mountLoggerFrom(candidate: unknown, receiver: unknown): MountLogger | undefined {
+  if (candidate === undefined || candidate === null) return undefined
+
+  if (typeof candidate === 'function') {
+    const record = candidate as unknown as Record<string, unknown>
+    const hasLevel = LEVELS.some((level) => typeof record[level] === 'function')
+    if (!hasLevel) {
+      // 纯函数 logger：四个级别共用同一个函数。
+      return {
+        info: guardedLoggerMethod(candidate, undefined),
+        warn: guardedLoggerMethod(candidate, undefined),
+        error: guardedLoggerMethod(candidate, undefined),
+        debug: guardedLoggerMethod(candidate, undefined),
+      }
+    }
+    return {
+      info: guardedLoggerMethod(record.info ?? candidate, record.info ? candidate : undefined),
+      warn: guardedLoggerMethod(record.warn ?? candidate, record.warn ? candidate : undefined),
+      error: guardedLoggerMethod(record.error ?? candidate, record.error ? candidate : undefined),
+      debug: guardedLoggerMethod(record.debug ?? candidate, record.debug ? candidate : undefined),
+    }
+  }
+
+  if (typeof candidate !== 'object') return undefined
+  const record = candidate as Record<string, unknown>
+  if (!LEVELS.some((level) => typeof record[level] === 'function')) return undefined
+  return {
+    info: guardedLoggerMethod(record.info, candidate),
+    warn: guardedLoggerMethod(record.warn, candidate),
+    error: guardedLoggerMethod(record.error, candidate),
+    debug: guardedLoggerMethod(record.debug, candidate),
+  }
+}
+
+const LEVELS = ['info', 'warn', 'error', 'debug'] as const
+
+/**
+ * 获取 mount 日志出口（任何分支都不抛异常）。
+ *
+ * 顺序：
+ *   1. `ctx.logger('agent-base:scheduler')`——返回对象或函数都可用；
+ *   2. `ctx.logger` 自身带日志方法（非可调用形态）；
+ *   3. 都不可用 → warn / error 回落 `console.warn` / `console.error`，
+ *      info / debug 静默。
+ *
+ * 解析阶段一旦失败（属性访问抛错 / 工厂调用抛错），继续尝试后续分支，
+ * 最终一定返回一个可安全调用的出口。
  */
 function resolveMountLogger(ctx: Context): MountLogger {
+  let service: unknown
   try {
-    const service = (ctx as unknown as { logger?: unknown }).logger
-    if (typeof service !== 'function') return NOOP_LOGGER
-    const logger = (service as (name: string) => unknown).call(ctx, 'agent-base:scheduler')
-    if (typeof logger !== 'object' || logger === null) return NOOP_LOGGER
-    const record = logger as Record<string, unknown>
-    return {
-      info: guardedLoggerMethod(record.info, logger),
-      warn: guardedLoggerMethod(record.warn, logger),
-      error: guardedLoggerMethod(record.error, logger),
-      debug: guardedLoggerMethod(record.debug, logger),
-    }
+    service = (ctx as unknown as { logger?: unknown }).logger
   } catch {
-    return NOOP_LOGGER
+    return consoleLogger()
   }
+
+  if (typeof service === 'function') {
+    try {
+      const produced = (service as (name: string) => unknown).call(ctx, 'agent-base:scheduler')
+      // 工厂返回值可以是对象，也可以是可直接调用的 logger 函数。
+      const fromFactory = mountLoggerFrom(produced, produced)
+      if (fromFactory !== undefined) return fromFactory
+    } catch {
+      // 工厂自身抛错：按不可用处理，走 console 兜底。
+    }
+    return consoleLogger()
+  }
+
+  // 非可调用形态：`ctx.logger` 自身就带日志方法。
+  try {
+    const direct = mountLoggerFrom(service, ctx)
+    if (direct !== undefined) return direct
+  } catch {
+    // 访问日志方法时抛错：走 console 兜底。
+  }
+
+  return consoleLogger()
 }
 
 /** 取工具服务；缺失 / 形状不符返回 `undefined`，绝不抛。 */
@@ -140,6 +213,12 @@ function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
+function errorCodeOf(error: unknown): string | undefined {
+  if (typeof error !== 'object' || error === null || !('code' in error)) return undefined
+  const code = (error as { code?: unknown }).code
+  return typeof code === 'string' ? code : undefined
+}
+
 /**
  * 装配调度子系统。
  *
@@ -153,8 +232,11 @@ export function mountScheduler(
   config: SchedulerConfig,
   workspace: string,
 ): AgentSchedulerService | undefined {
-  // 关闭态必须在任何 logger 访问之前返回：logger 服务缺失/抛错也不能影响 apply。
-  if (config?.enabled === false) return undefined
+  // 关闭态也要留一条可见日志；logger 解析全程不抛，缺失时走 console 兜底。
+  if (config?.enabled === false) {
+    resolveMountLogger(ctx).info('调度已禁用（scheduler.enabled=false）')
+    return undefined
+  }
   const log = resolveMountLogger(ctx)
 
   let scheduler: SchedulerService | undefined
@@ -274,7 +356,32 @@ export function mountScheduler(
 
     // 3) 工具注册完成后启动（start 内部逐任务隔离异常）。先启动再发布服务，
     //    避免 start 抛错时留下已注册却不可用的 `ctx.agentScheduler`。
-    scheduler.start()
+    const stats = scheduler.start()
+    log.info(
+      `调度器已启动：任务目录=${tasksDir}，时区=${scheduler.timezone}，` +
+        `已排定 ${stats.scheduled} 个任务（禁用 ${stats.disabled}，损坏 ${stats.corrupted}）`,
+    )
+    // 空目录 / 目录缺失 / 路径被文件占用是「启动正常但静默无事可做」的最常见根因，
+    // 必须可见。`existsSync` 无法区分「不存在」「不是目录」「不可访问」，故用
+    // `statSync` 分情况提示；任何 stat 失败都只 warn，不阻断 mount（store 自身
+    // 会兜住读取失败）。
+    let dirStat: ReturnType<typeof statSync> | undefined
+    try {
+      dirStat = statSync(tasksDir)
+    } catch (error) {
+      if (errorCodeOf(error) === 'ENOENT') {
+        log.warn(`任务目录不存在：${tasksDir}（首次使用请创建，或用 task_create 新建任务）`)
+      } else {
+        log.warn(`任务目录不可访问：${tasksDir}：${describeError(error)}`)
+      }
+    }
+    if (dirStat !== undefined) {
+      if (!dirStat.isDirectory()) {
+        log.warn(`任务目录不是目录：${tasksDir}（该路径被文件占用，无法作为 tasksDir）`)
+      } else if (stats.total === 0 && stats.corrupted === 0) {
+        log.warn(`任务目录为空：${tasksDir}，当前没有可调度任务`)
+      }
+    }
 
     // 4) 发布只读诊断服务。
     const service = new AgentSchedulerService(ctx, scheduler)

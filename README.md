@@ -480,6 +480,7 @@ script 返回契约：
 
 ```ts
 ctx.agentScheduler.scheduledIds       // 已排定的任务 id（升序快照）
+ctx.agentScheduler.nextRunAt(id)      // 下次触发时刻（未排定 undefined）
 ctx.agentScheduler.isRunning(id)      // 是否有在飞执行（单飞锁）
 ctx.agentScheduler.lastOutcome(id)    // 最近一次结局（含 skipped）
 ctx.agentScheduler.status(id)         // 失败状态（连续失败 / 窗口）
@@ -493,9 +494,23 @@ ctx.agentScheduler.runNow(id)         // 立即执行一次
 
 ### 故障排查
 
+启动与运行日志使用固定关键字，排查时先在宿主日志里搜索：
+
+| 关键字 | 含义 |
+| --- | --- |
+| `调度器已启动：任务目录=…，时区=…，已排定 N 个任务` | 启动成功；N 为实际装上 timer 的任务数 |
+| `任务清单加载完成：共 …，启用 …，禁用 …，损坏 …` | 每次 `start` / `reload` 的清单统计 |
+| `任务 <id> 已排定：下次触发 <ISO8601>（cron=…）` | debug 级；逐任务确认下次触发时刻 |
+| `任务 <id> 已禁用，跳过调度` | debug 级；任务 `enabled=false` |
+| `任务 <id> 结局：<kind> — <reason>` | 每次执行结局；`failed` 追加 `failureKind=<kind>` |
+| `任务目录不存在：…` / `任务目录为空：…` / `任务目录不是目录：…` / `任务目录不可访问：…` | 目录缺失、没有任何任务、路径被普通文件占用或 stat 失败：调度器仍正常启动，但不会有可调度任务 |
+| `调度已禁用（scheduler.enabled=false）` | 配置关闭了调度子系统 |
+
 | 现象 | 排查方向 |
 | --- | --- |
-| 任务不触发 | `task_get` 看 `enabled` / `cron`；`ctx.agentScheduler.scheduledIds` 是否包含该 id；cron 是否 5 段且合法 |
+| 完全没有调度日志 | 先搜 `调度器已启动` / `任务清单加载完成`；若都没有，说明 `ctx.logger` 不是可识别的形态（此时 warn / error 会走 `console` 兜底） |
+| 任务不触发 | `task_get` 看 `enabled` / `cron`；`ctx.agentScheduler.scheduledIds` 是否包含该 id；`nextRunAt(id)` 是否为 `undefined`；cron 是否 5 段且合法 |
+| 日志提示任务目录不存在 / 为空 / 不是目录 / 不可访问 | 创建 `<workspace>/.agent-base/tasks/`，或用 `task_create` 新建任务；若该路径被普通文件占用则先移走；不可访问时检查目录权限（需可读 + 可执行） |
 | 改了 JSON 没生效 | 运行中的调度器不监听文件变化；用 `task_update` 或调用 `reload()` 重新加载 |
 | script 一直 `missing` | `task_path` 相对 workspace 解析；确认文件存在、是普通文件、进程可读 |
 | script `parse` 失败 | stdout 最后一个非空行必须是 `{"shouldWake":...}` JSON；诊断日志不要放在最后一行 |

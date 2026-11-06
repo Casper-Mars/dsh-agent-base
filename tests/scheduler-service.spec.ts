@@ -430,3 +430,116 @@ describe('SchedulerService · stop 清理', () => {
     expect(harness.timer.pending).toBe(1)
   })
 })
+
+describe('SchedulerService · 可观测性', () => {
+  it('start 后 info 记录清单计数，debug 记录每条任务的排定 / 跳过', async () => {
+    const tasks = [
+      textTask('good'),
+      textTask('off', { enabled: false }),
+      textTask('bad', { cron: '61 * * * *' }),
+    ]
+    const harness = await makeService({ store: createStore(tasks, { corrupted: ['broken'] }) })
+
+    const stats = harness.service.start()
+
+    expect(stats).toEqual({ total: 3, enabled: 2, disabled: 1, corrupted: 1, scheduled: 1 })
+    const lines = harness.logger.lines.join('\n')
+    expect(lines).toContain('任务清单加载完成：共 3，启用 2，禁用 1，损坏 1')
+    expect(lines).toContain(
+      '任务 good 已排定：下次触发 2026-01-01T00:01:00+00:00（cron=* * * * *）',
+    )
+    expect(lines).toContain('任务 off 已禁用，跳过调度')
+
+    const scheduled = harness.logger.entries.find((entry) =>
+      entry.message.includes('任务 good 已排定'),
+    )
+    expect(scheduled?.level).toBe('debug')
+    const disabled = harness.logger.entries.find((entry) =>
+      entry.message.includes('任务 off 已禁用'),
+    )
+    expect(disabled?.level).toBe('debug')
+  })
+
+  it('结局日志包含 reason；failed 追加 failureKind 并用 warn', async () => {
+    const harness = await makeService({
+      tasks: [scriptTask()],
+      exec: createExec({ exitCode: 1, stderr: 'boom' }),
+    })
+
+    const outcome = await harness.service.runNow('demo')
+    expect(outcome.kind).toBe('failed')
+    if (outcome.kind !== 'failed') return
+
+    const entry = harness.logger.entries.find((item) =>
+      item.message.startsWith('任务 demo 结局：failed'),
+    )
+    expect(entry).toBeDefined()
+    expect(entry?.level).toBe('warn')
+    expect(entry?.message).toBe(`任务 demo 结局：failed — ${outcome.reason}（failureKind=exec）`)
+  })
+
+  it('skipped 结局用 warn，success 用 info', async () => {
+    const harness = await makeService({
+      tasks: [textTask('demo', { cooldown_ms: 60_000 })],
+    })
+
+    const first = await harness.service.runNow('demo')
+    expect(first.kind).toBe('woke')
+    const second = await harness.service.runNow('demo')
+    expect(second.kind).toBe('skipped')
+
+    const success = harness.logger.entries.find((item) =>
+      item.message.startsWith('任务 demo 结局：woke'),
+    )
+    expect(success?.level).toBe('info')
+    const skipped = harness.logger.entries.find((item) =>
+      item.message.startsWith('任务 demo 结局：skipped'),
+    )
+    expect(skipped?.level).toBe('warn')
+    expect(skipped?.message).toContain(second.reason)
+  })
+
+  it('单飞跳过：日志含「结局：skipped — 」且只打一条（不再重复 warn）', async () => {
+    let release: () => void = () => {}
+    const delivery = createDelivery({
+      deliver: () =>
+        new Promise<DeliveryResult>((resolve) => {
+          release = () => resolve('delivered')
+        }),
+    })
+    const harness = await makeService({ tasks: [textTask()], delivery })
+
+    const first = harness.service.runNow('demo')
+    const second = await harness.service.runNow('demo')
+    expect(second.kind).toBe('skipped')
+
+    const skippedLogs = harness.logger.entries.filter((item) =>
+      item.message.startsWith('任务 demo 结局：skipped'),
+    )
+    expect(skippedLogs).toHaveLength(1)
+    expect(skippedLogs[0]?.level).toBe('warn')
+    expect(skippedLogs[0]?.message).toContain('结局：skipped — ')
+    expect(skippedLogs[0]?.message).toContain('already running')
+    // 旧格式（绕过 logOutcome 的直白 warn）不得再出现。
+    expect(
+      harness.logger.entries.some(
+        (item) => item.message === '任务 demo 已在执行中，本次触发跳过',
+      ),
+    ).toBe(false)
+
+    release()
+    expect((await first).kind).toBe('woke')
+  })
+
+  it('nextRunAt：已排定返回 Date，未排定 / 不存在返回 undefined，触发后随链更新', async () => {
+    const harness = await makeService({ tasks: [textTask()] })
+    harness.service.start()
+
+    expect(harness.service.nextRunAt('demo')?.toISOString()).toBe('2026-01-01T00:01:00.000Z')
+    expect(harness.service.nextRunAt('off')).toBeUndefined()
+    expect(harness.service.nextRunAt('missing')).toBeUndefined()
+
+    await harness.timer.advance(60_000)
+    expect(harness.service.nextRunAt('demo')?.toISOString()).toBe('2026-01-01T00:02:00.000Z')
+  })
+})

@@ -55,7 +55,7 @@
 - **诊断与手动触发服务**：`ctx.agentScheduler`（`scheduledIds` / `isRunning` /
   `lastOutcome` / `status` 为只读查询，`reload` / `runNow` 为两个显式操作——`runNow` 会真实执行
   并投递、`reload` 会重读磁盘任务定义），不暴露 store / state / timer。
-- **测试**：调度子系统单元测试与装配级集成测试，全量 410 个测试通过。
+- **测试**：调度子系统单元测试与装配级集成测试，全量 424 个测试通过。
 
 ### Changed
 
@@ -74,6 +74,13 @@
 
 ### Fixed
 
+- 调度静默无日志：`mountScheduler` 启动成功后 info 记录任务目录、时区与
+  「已排定 / 禁用 / 损坏」计数；任务目录不存在或为空时 warn；`enabled=false` 时记录
+  「调度已禁用」；`rebuild()` 后 info 记录清单统计，每条任务排定 / 跳过写 debug；
+  结局日志补齐 `reason`，`failed` 追加 `failureKind`，`failed` / `skipped` 使用 warn。
+  `resolveMountLogger` 兼容「工厂返回对象 / 工厂返回函数 / `ctx.logger` 自身带方法」
+  三种形态，全部不可用时 warn / error 回落 `console`，任何分支都不抛异常。
+  诊断服务新增 `nextRunAt(id)`（`SchedulerService` 与 `ctx.agentScheduler` 同步透传）。
 - 任务文件内 `id` 与文件名骨架不一致时统一视为损坏：`list()` 跳过，`get()` 返回
   `undefined`，避免同一 id 装出多份 timer 或状态归属错乱。
 - `task_update` 仅改名 / 改 cron / 改 `enabled` 时不再因任务程序暂时缺失而失败，
