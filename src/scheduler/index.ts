@@ -152,3 +152,6 @@ export {
   validateTaskId,
 } from './tools.js'
 export type { SchedulerToolsOptions, TaskStoreLike, TaskView } from './tools.js'
+
+export { AgentSchedulerService } from './agent-service.js'
+export { mountScheduler } from './mount.js'

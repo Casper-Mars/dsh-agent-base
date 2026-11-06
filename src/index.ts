@@ -24,6 +24,8 @@ import { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
 import { AgentBaseError } from './errors.js'
 import { validateExistingMain } from './validate.js'
 import type { Config } from './config.js'
+import { resolveSchedulerConfig } from './config.js'
+import { mountScheduler } from './scheduler/mount.js'
 
 /** 插件唯一标识，必须与 `cordis.patch.yml` 中 row 的 `id`/`name` 对应。 */
 export const name = 'agent-base'
@@ -40,7 +42,13 @@ export const inject = ['workspaceRegistry', 'sessionPersistence', 'agents']
 
 // `export { Config }` 同时携带 const 与 interface 两个含义（声明合并），
 // 消费方可 `import { Config }`（schema）或 `import type { Config }`（类型）。
-export { Config } from './config.js'
+export {
+  Config,
+  DEFAULT_SCHEDULER_CONFIG,
+  resolveSchedulerConfig,
+  resolveSystemTimezone,
+} from './config.js'
+export type { SchedulerConfig } from './config.js'
 export { AgentBaseService } from './service.js'
 export type { AgentBaseOptions } from './service.js'
 export { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
@@ -57,6 +65,8 @@ export {
 } from './errors.js'
 export { validateExistingMain } from './validate.js'
 export type { ValidateExistingMainDeps, ValidateExistingMainOptions } from './validate.js'
+export { mountScheduler } from './scheduler/mount.js'
+export { AgentSchedulerService } from './scheduler/agent-service.js'
 
 /**
  * 插件装配入口。
@@ -83,6 +93,9 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       workspaceCwd: workspace.path,
       mainSessionId: config.mainSessionId as SessionId,
     })
+
+    // 调度子系统：任何异常都只 warn 降级，绝不阻断插件启动。
+    mountScheduler(ctx, resolveSchedulerConfig(config.scheduler), workspace.path)
   } catch (error) {
     if (error instanceof AgentBaseError) throw error
     throw new AgentBaseConfigError(
