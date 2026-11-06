@@ -249,8 +249,8 @@ export interface DeliveryInput {
   readonly fallbackFrom?: string
 }
 
-/** 投递结果：已投递 / 已入离线队列 / 已跳过。 */
-export type DeliveryResult = 'delivered' | 'queued' | 'skipped'
+/** 投递结果：已投递 / 已入离线队列 / 已跳过 / 目标从未 provisioned。 */
+export type DeliveryResult = 'delivered' | 'queued' | 'skipped' | 'failed'
 
 /**
  * 投递端口（由宿主注入）。

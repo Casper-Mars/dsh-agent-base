@@ -182,14 +182,33 @@ describe('目标解析（D5：与 allowCustomSession 无关）', () => {
     expect(h.logs.warn.some((m) => m.includes('disk on fire'))).toBe(true)
   })
 
-  it('未命中且 main 也不 live → 消息入 outbox（queued）', async () => {
+  it('未命中且 main 从未 provisioned → failed，不入 outbox', async () => {
     const h = setup({
       sessionPersistence: { stat: async () => undefined },
     })
     const target = await h.port.resolveTarget(task({ session_id: 'ghost' }))
+    const result = await h.port.deliver(
+      input({ text: '回退 main', sessionId: target.sessionId }),
+    )
+    expect(result).toBe('failed')
+    expect(h.port.pendingCount('main')).toBe(0)
     expect(
-      await h.port.deliver(input({ text: '回退 main', sessionId: target.sessionId })),
-    ).toBe('queued')
+      h.logs.warn.some(
+        (m) => m.includes('未 provisioned') && m.includes('task-1'),
+      ),
+    ).toBe(true)
+  })
+
+  it('main 有快照但离线 → 仍按 deliverOnOffline 入队（transient）', async () => {
+    const h = setup({
+      sessionPersistence: {
+        stat: async () => ({ header: { cwd: '/tmp/ws' } }),
+      },
+    })
+    const target = await h.port.resolveTarget(task({ session_id: 'ghost' }))
+    await expect(
+      h.port.deliver(input({ text: '回退 main', sessionId: target.sessionId })),
+    ).resolves.toBe('queued')
     expect(h.port.pendingCount('main')).toBe(1)
   })
 
@@ -230,7 +249,9 @@ describe('目标解析（D5：与 allowCustomSession 无关）', () => {
 
   it('入队日志的 meta 带 fallbackFrom（P3-4）', async () => {
     const h = setup({
-      sessionPersistence: { stat: async () => undefined },
+      sessionPersistence: {
+        stat: async () => ({ header: { cwd: '/tmp/ws' } }),
+      },
     })
     const target = await h.port.resolveTarget(task({ session_id: 'ghost' }))
     await h.port.deliver(

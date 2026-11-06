@@ -7,12 +7,15 @@
  *   1. `resolveFixedWorkspace` 解析并注册固定 workspace（纯函数，可单测）；
  *   2. `validateExistingMain` 校验已存在的 main session 的 cwd 是否与之一致
  *      （只读守卫：不创建、不恢复、不 attachSession、不改 header）；
- *   3. 两步都成功后实例化 {@link AgentBaseService}，由 Cordis fiber 管理生命周期。
+ *   3. 两步都成功后实例化 {@link AgentBaseService}，由 Cordis fiber 管理生命周期；
+ *   4. 以 `void ensureMain(...)` 在后台准备 main session（不 await，不阻塞启动）；
+ *   5. 装配调度子系统。
  *
- * 顺序固定为「resolve → validate → service」，校验失败时不会留下已注册的服务。
+ * 顺序固定为「resolve → validate → service → ensure(background) → scheduler」，
+ * 校验失败时不会留下已注册的服务。
  *
- * 仍然不做：创建/恢复 main session；核心自身不投递消息（0.2.0 起调度子系统可向已 live
- * 会话投递，见 `src/scheduler/`）。
+ * 仍然不做：在调度器里创建 / 恢复会话（调度器只投递）；核心自身不投递消息
+ * （0.2.0 起调度子系统可投递，见 `src/scheduler/`）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
@@ -24,6 +27,7 @@ import { AgentBaseService } from './service.js'
 import { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
 import { AgentBaseError } from './errors.js'
 import { validateExistingMain } from './validate.js'
+import { ensureMain } from './ensure-main.js'
 import type { Config } from './config.js'
 import { resolveSchedulerConfig } from './config.js'
 import { mountScheduler } from './scheduler/mount.js'
@@ -35,11 +39,19 @@ export const name = 'agent-base'
  * 依赖服务（契约固定）：
  *   - `workspaceRegistry`   —— 工作区注册表
  *   - `sessionPersistence`  —— 会话持久化（校验已有 main session 的 cwd）
- *   - `agents`              —— agent 注册表（校验时只读 `get`，base 自身不创建）
+ *   - `agents`              —— agent 注册表（读取 / 创建 / 恢复）
+ *   - `agentPresets`        —— 宿主默认 preset（准备 main session 时 resolve / mount）
+ *   - `agentDefaultModel`   —— 默认模型选择（resume / create 必须带 agentOptions）
  *
  * 必须与 `cordis.patch.yml` 中对应条目的 `inject` 逐项一致。
  */
-export const inject = ['workspaceRegistry', 'sessionPersistence', 'agents']
+export const inject = [
+  'workspaceRegistry',
+  'sessionPersistence',
+  'agents',
+  'agentPresets',
+  'agentDefaultModel',
+]
 
 // `export { Config }` 同时携带 const 与 interface 两个含义（声明合并），
 // 消费方可 `import { Config }`（schema）或 `import type { Config }`（类型）。
@@ -52,6 +64,8 @@ export {
 export type { SchedulerConfig } from './config.js'
 export { AgentBaseService } from './service.js'
 export type { AgentBaseOptions } from './service.js'
+export { DEFAULT_ENSURE_TIMEOUT_MS, ensureMain } from './ensure-main.js'
+export type { EnsureMainOptions } from './ensure-main.js'
 export { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
 export type {
   FixedWorkspaceFs,
@@ -94,6 +108,10 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       workspaceCwd: workspace.path,
       mainSessionId: config.mainSessionId as SessionId,
     })
+
+    // workspace 生命周期：后台准备 main session。不 await、不阻塞插件启动；
+    // 失败 / 超时只在日志里 warn（ensureMain 自身保证永不 reject）。
+    void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })
 
     // 调度子系统：任何异常都只 warn 降级，绝不阻断插件启动。
     mountScheduler(ctx, resolveSchedulerConfig(config.scheduler), workspace.path)

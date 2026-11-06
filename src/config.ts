@@ -91,6 +91,12 @@ export interface Config {
   workspace: string
   /** 后台投递默认使用的稳定 session id。 */
   mainSessionId: string
+  /**
+   * 启动期后台准备 main session 的超时（毫秒），默认 `10000`。
+   *
+   * 超时只放弃等待并 warn，准备流程本身继续在后台完成；不影响插件启动。
+   */
+  ensureTimeoutMs?: number
   /** 目录不存在时是否创建，默认 `true`。 */
   createWorkspaceDir?: boolean
   /** 启动时校验同 id 的持久化 session 的 cwd 是否与固定工作区一致，默认 `true`。 */
@@ -121,6 +127,7 @@ const SchedulerConfigSchema: z<SchedulerConfig> = z.object({
 export const Config: z<Config> = z.object({
   workspace: z.string().required(),
   mainSessionId: z.string().min(1).pattern(/^[A-Za-z0-9._-]{1,64}$/).required(),
+  ensureTimeoutMs: z.number().min(1).default(10_000),
   createWorkspaceDir: z.boolean().default(true),
   validateExistingMain: z.boolean().default(true),
   // 子对象整体缺省 / 整体替换时都补齐默认值（依赖 schemastery 的字段级 default）。

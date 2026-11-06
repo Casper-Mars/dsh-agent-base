@@ -31,7 +31,7 @@
         showTime: 'yyyy-MM-dd hh:mm:ss '
     - id: agent-base
       name: dsh-agent-base
-      inject: ['workspaceRegistry', 'sessionPersistence', 'agents']
+      inject: ['workspaceRegistry', 'sessionPersistence', 'agents', 'agentPresets', 'agentDefaultModel']
       config:
         workspace: /workspace
         mainSessionId: main

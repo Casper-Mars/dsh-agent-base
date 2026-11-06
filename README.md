@@ -1,9 +1,9 @@
 # dsh-agent-base
 
-固定 Workspace 与 main session id 的 dsh 插件包。核心是**身份与路径的权威来源**：
-不创建 Agent、不恢复会话、不提供 `ensure`。0.2.0 起内置定时调度子系统，
-可向**已 live** 的会话投递任务结果与失败通知；目标未 live 时进入内存 outbox
-或按配置跳过（见「[定时任务（scheduler）](#定时任务scheduler)」）。
+固定 Workspace 与 main session id 的 dsh 插件包。核心是**身份与路径的权威来源**。
+workspace 生命周期会在 `apply()` 之后**后台准备 main session**（复用 live / `resume` / `create`，
+不阻塞插件启动）。0.2.0 起内置定时调度子系统，可向会话投递任务结果与失败通知；
+目标未 live 时进入内存 outbox 或按配置跳过（见「[定时任务（scheduler）](#定时任务scheduler)」）。
 
 > **适用范围：仅 web profile。** 本包通过 bundle patch 禁用 `directory-picker`，
 > web 组合里存在该行，其他 profile 没有；装到别的 profile 会报找不到该行。
@@ -13,17 +13,18 @@
 - 禁用 `directory-picker`（`@deepseek-ai/dsh-host-directory-picker-auto`）：
   directory-flow 槽位没有 occupant 后，`Add workspace` 按钮和快捷键入口自动消失，
   workspace picker 里也不再出现「添加工作区」。这是 dsh 官方支持的组合级关闭方式。
-- 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents`）。
+- 插入 `agent-base` 插件行（`inject: workspaceRegistry / sessionPersistence / agents / agentPresets / agentDefaultModel`）。
 - 0.2.0 起在插件 `apply` 中装配定时调度器：从 workspace 读取任务定义、按 cron
   触发、通过 8 个 `task_*` 工具管理，并发布诊断与手动触发服务 `ctx.agentScheduler`。
 
 当前版本（0.2.0）在**固定 workspace 的解析、注册、已有 main session 校验与只读服务发布**
 之上新增**定时调度子系统**：任务定义存于 workspace，按 5 段 cron 触发；支持 text 与
-script 两类任务、失败通知、离线补投与 8 个 `task_*` 工具。仍未实现：main session 创建/恢复。
+script 两类任务、失败通知、离线补投与 8 个 `task_*` 工具。main session 的创建 / 恢复
+由启动期的后台 `ensureMain` 负责，调度器本身仍然不创建、不恢复会话。
 
 启动时按 `config.workspace` 校验绝对路径 → `mkdir -p`（可选）→ `realpath` →
 `workspaceRegistry.create(canonical)` → 校验同 id 的 main session 的 cwd 是否与之一致 →
-发布只读的 `ctx.agentBase` service → 装配调度子系统。
+发布只读的 `ctx.agentBase` service → **后台准备 main session（不 await）** → 装配调度子系统。
 
 ### 启动序列
 
@@ -40,7 +41,12 @@ apply()
   │    │    ├─ undefined → 无该 session，通过
   │    │    └─ 有快照 → 比较 header.cwd
   │    └─ cwd 不一致 → AgentBaseWorkspaceMismatchError
-  └─ new AgentBaseService(ctx, { workspaceCwd: workspace.path, mainSessionId })
+  ├─ new AgentBaseService(ctx, { workspaceCwd: workspace.path, mainSessionId })
+  ├─ void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })   // 后台，不 await
+  │    ├─ agents.get(mainSessionId) 命中 → 复用 live Agent
+  │    ├─ 有快照 → canonical cwd 校验 → agents.resume(...)
+  │    └─ 无快照 → agents.create(...) → workspace.attachSession(mainSessionId)
+  └─ mountScheduler(...)
 ```
 
 校验严格在 service 实例化**之前**完成：失败时不会留下已注册的 `ctx.agentBase`。
@@ -93,8 +99,8 @@ const id = ctx.agentBase.mainSessionId
 
 - 两个值在构造后不可变（属性不可写、不可重配置）；
 - **没有** `ensure` / `deliver` / `bind` / `status`；
-- 不创建/恢复 Agent，不调用 `workspace.attachSession`；
-- 消费方自行创建/恢复 Agent，并自行决定 followup / steer。
+- 服务本身不创建/恢复 Agent，main 的准备由 `apply` 的后台生命周期完成，且不通过该服务暴露；
+- 消费方自行决定消息的 followup / steer。
 
 ### 失败模式
 
@@ -103,7 +109,7 @@ const id = ctx.agentBase.mainSessionId
 | `config.workspace` 为空/相对路径/不可访问 | 启动失败，`AgentBaseConfigError`（message 含配置原值） |
 | live 或 persisted main session 的 cwd 与固定 workspace 不一致 | 启动失败，`AgentBaseWorkspaceMismatchError`（message 含 actual 与 expected） |
 | `sessionPersistence.stat` 抛错 | 启动失败，`AgentBaseValidationError`（`cause` 为原始错误） |
-| 没有任何 main session | 启动通过，**不**创建 session |
+| 没有任何 main session | 启动通过；后台准备 main（`created`），失败只 warn，不阻断启动 |
 
 任何情况下都不会「静默改投」到别的 workspace，也不会把已有 session 改绑到固定 workspace。
 
@@ -124,8 +130,8 @@ const id = ctx.agentBase.mainSessionId
 
 注意：profile 层的 `config` 是**整体替换**而非深合并，覆盖时必须显式写 `workspace`
 与 `mainSessionId` 两个必填字段，否则会报缺失（例如 `mainSessionId missing required value`）。
-`createWorkspaceDir` / `validateExistingMain` 有默认值，可省略；但整体替换时建议写全四个字段，
-以免误读。
+`createWorkspaceDir` / `validateExistingMain` / `ensureTimeoutMs` 有默认值，可省略；
+但整体替换时建议显式写全，以免误读。
 
 ## 构建
 
@@ -186,6 +192,7 @@ dsh plugin --profile web remove dsh-agent-base
     mainSessionId: main
     createWorkspaceDir: true
     validateExistingMain: true
+    ensureTimeoutMs: 10000
 ```
 
 | 字段 | 说明 |
@@ -194,11 +201,39 @@ dsh plugin --profile web remove dsh-agent-base
 | `mainSessionId` | 必填且非空，稳定 id，`[A-Za-z0-9._-]{1,64}` |
 | `createWorkspaceDir` | 目录不存在时是否创建，默认 `true` |
 | `validateExistingMain` | 已有同 id 会话的 cwd 不一致时是否启动失败，默认 `true` |
+| `ensureTimeoutMs` | 启动期后台准备 main session 的等待上限（毫秒，默认 `10000`，最小 `1`）；超时只 warn，准备继续在后台进行 |
 | `scheduler` | 可选，定时调度子配置；整体省略时全部取默认值（`enabled=true`），字段见「[定时任务（scheduler）](#定时任务scheduler)」 |
 
-`validateExistingMain: false` 会**完全跳过**校验（连 `agents.get` / `stat` 都不调用），
-已有 session 的 cwd 不一致也不会阻止启动。仅建议用于一次性排障，不建议用于生产：
-它会让 session 与固定 workspace 不一致的脏状态静默通过。
+`validateExistingMain: false` 会**完全跳过启动期校验**（该校验自身不再调用 `agents.get` / `stat`），
+已有 session 的 cwd 不一致也不会阻止启动。注意：后台 `ensureMain` 仍会独立执行只读探测与准备。
+仅建议用于一次性排障，不建议用于生产：它会让 session 与固定 workspace 不一致的脏状态静默通过。
+
+### main session 启动准备
+
+`apply()` 发布 `ctx.agentBase` 后，立即以 `void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })`
+在**后台**准备 main session。它不 await、不阻塞插件启动，也不影响 `mountScheduler`：
+
+```text
+agents.get(mainSessionId) 命中 → 复用 live Agent
+sessionPersistence.stat(mainSessionId)
+  ├─ 有快照 → canonical cwd 校验 → agents.resume({ resumeSessionId, agentOptions, setup })
+  └─ 无快照 → agents.create({ sessionId, meta: { cwd: workspaceCwd, agentPreset }, agentOptions, setup })
+              → workspaceRegistry.create(workspaceCwd).attachSession(mainSessionId)
+```
+
+固定语义：
+
+- preset 恒用宿主默认（`agentPresets.resolve(undefined)`），模型恒用 `agentDefaultModel.currentSelection()`；
+  `agentOptions` 必传，缺失服务时按可读错误降级；
+- **single-flight**：同一 `Context` + session 的并发准备只跑一次；
+- **cwd 守卫**：`resume` 前做 canonical 比较，不一致直接拒绝，绝不把会话投到错误 workspace；
+- **already exists 竞态**：`create` 抛 already exists 时回读 `agents.get`，命中则复用；
+- 新建成功后 `attachSession` 进固定 workspace；失败则 dispose 刚创建的 handle；
+- handle 通过 `ctx.effect` 随插件 fiber 卸载释放；
+- `ensureTimeoutMs` 到点只写 `main session 准备超时（…ms），转入后台`，准备流程继续；
+- 成功日志：`main session 已就绪（created|resumed）`；失败日志：`main session 准备失败：<原因>`。
+
+后台准备失败**不会**让 `apply` 失败；受影响的只是「main 从未 provisioned」时的任务投递（见下文）。
 
 ## 定时任务（scheduler）
 
@@ -207,7 +242,8 @@ dsh plugin --profile web remove dsh-agent-base
 - 任务定义是 workspace 里的 JSON 文件（`<workspace>/.agent-base/tasks/<id>.json`），可直接编辑、备份、迁移；
 - 调度器按 5 段 cron（分 时 日 月 周）触发，最小粒度分钟；
 - 任务分两类：`text`（到点渲染文本并投递）与 `script`（跑一个 Node 程序，读 stdout 末行 JSON 决定是否投递）；
-- 只向**已 live** 的会话投递；目标未 live 时按 `deliverOnOffline` 入内存 outbox 或跳过；
+- 只向会话投递；目标未 live 时按 `deliverOnOffline` 入内存 outbox 或跳过；
+  main 从未 provisioned 时返回 `failed`（不排队）；
 - 通过 8 个 `task_*` 工具做增删改查与立即执行，另发布诊断与手动触发服务 `ctx.agentScheduler`。
 
 目录布局：
@@ -223,7 +259,9 @@ dsh plugin --profile web remove dsh-agent-base
     └── daily-report.mjs       # 任务程序（script 任务）
 ```
 
-> 调度器**不创建 / 不恢复会话**。它只复用 `ctx.agents` 里已 live 的 agent 投递消息；会话生命周期仍由消费方负责。
+> 调度器**不创建 / 不恢复会话**。它只复用 `ctx.agents` 里已 live 的 agent 投递消息；
+> main 的准备由 workspace 启动阶段的后台 `ensureMain` 负责。若 main 从未 provisioned
+> （`sessionPersistence.stat` 无快照），投递返回 `failed`，任务结局为 `failed / deliver`，不进入 outbox。
 
 ### 最小可用配置
 
@@ -418,6 +456,7 @@ script 返回契约：
 - **不阻塞下一轮**：执行在后台结算，下一次 cron 到点仍会照常触发；
 - **冷却**：`cooldown_ms` 只在**投递成功后**开始计时（`delivered` / `queued` 都算投递成功）；冷却期内触发返回 `skipped`；
 - **离线补投**：`deliverOnOffline: queue`（默认）把消息放进内存 outbox，目标会话上线（`agent/created`）时按入队顺序补投；`skip` 则直接丢弃并返回 `skipped`；
+- **main 未 provisioned 不排队**：目标为 main 且 `sessionPersistence.stat` 无快照（从未创建成功）时，返回 `failed` 且不入 outbox；只有「有快照但暂时离线」才按 `deliverOnOffline` 处理；
 - outbox 只在内存中，**进程重启即丢失**；每条消息有 `pendingTtlMs` TTL，每任务最多 `maxPendingPerTask` 条，超限不再入队；
 - `task_run_now` 立即执行一次，不影响既有 cron 计时，也不检查 `enabled`（可用来手动跑一个已禁用的任务）。
 
@@ -431,7 +470,7 @@ script 返回契约：
 | `runtime` | 扩展名不在白名单；`allowScript=false`；Node 进程启动失败（运行时不可用） |
 | `exec` | 非零退出、崩溃、超时、stdout 超限 |
 | `parse` | stdout 末行不是合法结果 JSON |
-| `deliver` | 投递异常（例如目标解析失败） |
+| `deliver` | 投递异常（例如目标解析失败）；目标 main 从未 provisioned |
 
 通知策略：
 
@@ -470,7 +509,7 @@ script 返回契约：
 
 1. `session_id` 为空 / 未写 → 投 `mainSessionId`；
 2. `session_id` 对应的 agent **live** → 投它；
-3. 不 live（或无法确认）→ **回退 `mainSessionId`**，并在结局里记录 `fallbackFrom`（原目标 id）。注意：自定义目标未 live 时不会为它排队，而是直接投 main；main 也未 live 时才按 `deliverOnOffline` 入 outbox / 跳过。
+3. 不 live（或无法确认）→ **回退 `mainSessionId`**，并在结局里记录 `fallbackFrom`（原目标 id）。注意：自定义目标未 live 时不会为它排队，而是直接投 main；main 有快照但未 live 时按 `deliverOnOffline` 入 outbox / 跳过；main 从未 provisioned 时返回 `failed`。
 
 `allowCustomSession` 建议保持 `false`，只在确实需要多会话分流时打开，并确保目标会话由消费方负责保持 live。
 
@@ -537,11 +576,10 @@ ctx.agentScheduler.runNow(id)         // 立即执行一次
 
 ## 消费方接入
 
-调度之外，本包为消费方发布 `ctx.agentBase` 的两个只读值（`workspaceCwd` / `mainSessionId`）；
-调度启用时另有诊断与手动触发服务 `ctx.agentScheduler`（见上节）。
-**base 核心不创建 main、不提供 `ensure`**：首个 main Agent、消息的 source 与
-幂等键、并发保护、`followup` 还是 `steer`，全部由消费方自己决定。定时调度只向
-已 live 的会话投递，不承接消费方的通用投递需求。
+调度之外，本包为消费方发布 `ctx.agentBase` 的两个只读值（`workspaceCwd` / `mainSessionId`），
+并在启动期**后台准备 main session**；调度启用时另有诊断与手动触发服务 `ctx.agentScheduler`（见上节）。
+**base 仍然不替消费方投递**：消息的 source / 幂等键、`followup` 还是 `steer` 由消费方决定。
+main 的准备逻辑已作为正式模块导出（`ensureMain`），消费方可直接复用其 single-flight 与 cwd 守卫。
 
 ### 读取顺序：显式 session 优先
 
@@ -553,39 +591,41 @@ const sessionId = explicitSessionId ?? ctx.agentBase.mainSessionId
 `ctx.agentBase` 只服务「没有指定 session」的场景（后台派单、定时任务、webhook 转投等）。
 显式 session 的 cwd、preset、生命周期由调用方自己负责。
 
-### `ensureMain` 参考实现
+### main session 准备（`ensureMain`）
 
-完整可复制示例见 [`examples/ensure-main.ts`](./examples/ensure-main.ts)
-（**示例，不是本包导出**：未在 `package.json` 的 `exports` / `files` 中，也不进 `dist-server`）。
-它演示的链路：
+内置实现见 `src/ensure-main.ts`，并从包入口导出 `ensureMain` / `DEFAULT_ENSURE_TIMEOUT_MS`。
+它负责「保证 `ctx.agentBase.mainSessionId` 有一个 live Agent」：
 
 ```text
-显式 sessionId ? 用显式值（不读 agentBase） : 读 ctx.agentBase
-  → ctx.agents.get(mainSessionId) 命中 → 复用 live Agent
-  → 未命中：ctx.sessionPersistence.stat(mainSessionId)
-      ├─ 有快照：canonical 校验 header.cwd（realpath 归一）→ ctx.agents.resume({ resumeSessionId, agentOptions, setup })
-      └─ 无快照：ctx.agents.create({ sessionId, meta: { cwd: workspaceCwd, agentPreset }, agentOptions, setup })
-                → workspaceRegistry.create(workspaceCwd).attachSession(mainSessionId)
-  → agent.followup(createUserMessage({ content, source: { kind, deliveryId, ... } }))
+ctx.agents.get(mainSessionId) 命中 → 复用 live Agent
+ctx.sessionPersistence.stat(mainSessionId)
+  ├─ 有快照：canonical 校验 header.cwd（realpath 归一）→ ctx.agents.resume({ resumeSessionId, agentOptions, setup })
+  └─ 无快照：ctx.agents.create({ sessionId, meta: { cwd: workspaceCwd, agentPreset }, agentOptions, setup })
+            → workspaceRegistry.create(workspaceCwd).attachSession(mainSessionId)
 ```
 
-| 场景 | 参考实现的行为 |
+| 场景 | 行为 |
 | --- | --- |
-| main 已在 live registry | 直接复用，不 resume、不 create |
-| 有持久化快照 | 先按 canonical 路径校验 `header.cwd`（字符串不等时 `realpath` 归一），再 `resume`（**必须带 `agentOptions`**，否则恢复出的 Agent 没有模型） |
+| main 已在 live registry | 直接复用，不 resume、不 create、不 stat |
+| 有持久化快照 | 先按 canonical 路径校验 `header.cwd`，再 `resume`（必须带 `agentOptions`） |
 | 无持久化快照 | `create` 时把 `meta.cwd` 固定为 `workspaceCwd`，随后 `attachSession` 进固定 workspace |
-| 调用方给了显式 session | 只走显式分支，完全不读 `ctx.agentBase`；不存在时由调用方决定重建 |
+| 并发调用 | single-flight 合并为一次 |
+| 超时 | `ensureTimeoutMs` 到点只 warn，后台继续 |
+
+[`examples/ensure-main.ts`](./examples/ensure-main.ts) 仍然保留，作为**消费方投递链路**的完整示例
+（自定义消息 `source` / 幂等键 / `followup`）；其中的 ensure 仅是演示，正式实现以本包导出为准。
+示例自身的类型检查：
+
+```bash
+pnpm typecheck:examples   # examples/**/*.ts，独立 tsconfig.examples.json，noEmit
+```
 
 ### 由消费方决定、base 不提供的能力
 
-- **single-flight**：并发首次投递要在消费方做（示例用 `WeakMap<Context, Map<SessionId, Promise>>`
-  缓存进行中的 ensure，**main 与显式 session 两条路径共用**），否则并发的 `create` / `resume`
-  会有一个收到 already exists；
 - **source / deliveryId**：消息来源与幂等键由消费方声明。示例通过合并扩展
   `MessageSourceMap` 定义自己的 `kind`，base 不认识也不校验任何来源；
 - **followup 还是 steer**：示例用 `followup` 排一个独立 turn；要插入当前 step 请改用 `agent.steer(...)`；
-- **handle 释放**：`create` / `resume` 返回的 `AgentHandle` 由调用方持有，示例用
-  `ctx.effect(() => () => handle.dispose())` 随插件 fiber 卸载释放；释放后再投递会走 `resume`，不会重复建会话。
+- **显式 session**：调用方给出 `sessionId` 时完全不读 `ctx.agentBase`，其 cwd / preset / 生命周期由调用方自己负责。
 
 示例自身的类型检查：
 

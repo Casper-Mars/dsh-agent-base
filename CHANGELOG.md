@@ -55,7 +55,13 @@
 - **诊断与手动触发服务**：`ctx.agentScheduler`（`scheduledIds` / `isRunning` /
   `lastOutcome` / `status` 为只读查询，`reload` / `runNow` 为两个显式操作——`runNow` 会真实执行
   并投递、`reload` 会重读磁盘任务定义），不暴露 store / state / timer。
-- **测试**：调度子系统单元测试与装配级集成测试，全量 424 个测试通过。
+- **main session 启动准备**（`src/ensure-main.ts`）：`ensureMain(ctx, { timeoutMs })`
+  在 `apply` 发布 `ctx.agentBase` 后**后台**执行，复用 live / `resume` / `create` 三态；
+  内置 single-flight、canonical cwd 守卫、already-exists 回读、handle `ctx.effect` 释放；
+  `agentOptions` 强制来自 `agentDefaultModel.currentSelection()`，preset 恒用宿主默认；
+  超时只 warn 并在后台继续，失败永不 reject。
+- **配置**：新增 `ensureTimeoutMs`（默认 `10000`，最小 `1`）。
+- **测试**：调度子系统单元测试、`ensureMain` 状态机测试与装配级集成测试，全量 441 个测试通过。
 
 ### Changed
 
@@ -68,6 +74,12 @@
 - `Config` 新增可选 `scheduler` 子配置；缺省时使用 `DEFAULT_SCHEDULER_CONFIG`。
 - 插件 `apply` 在发布 `ctx.agentBase` 后装配调度子系统；`ctx.agentBase` 的
   `workspaceCwd` / `mainSessionId` 契约与只读语义不变，调度器从它读取默认投递目标。
+- `apply` 在发布服务后以 `void ensureMain(...)` 后台准备 main session（不 await）；
+  插件 `inject` 增加 `agentPresets` / `agentDefaultModel`。
+- **调度器对「main 从未 provisioned」明确失败**：目标为 main、agent 未 live 且
+  `sessionPersistence.stat` 无快照时，`DeliveryResult` 返回 `'failed'`，不进入 outbox；
+  任务结局为 `failed / deliver`（detail: `main session 未 provisioned`）。
+  有快照但离线仍按 `deliverOnOffline` 入队（瞬态）。
 - README 新增「定时任务（scheduler）」章节，覆盖配置、任务格式、占位符、校验、
   结局、失败通知、`allowCustomSession`、工具与诊断服务；原文中「不投递消息」的表述
   修正为「核心不投递，调度子系统可向已 live 会话投递」。
@@ -78,6 +90,9 @@
   `./scheduler` 子路径，`parseCron` / `TaskStore` 等不对包外消费者开放。
 
 ### Fixed
+
+- main session 从未成功创建时不再静默进入 outbox 并永远等不到补投：投递直接返回
+  `failed` 并 warn「目标 main session 未 provisioned（任务 X）」，便于定位启动期准备失败。
 
 - 调度静默无日志：`mountScheduler` 启动成功后 info 记录任务目录、时区与
   「已排定 / 禁用 / 损坏」计数；任务目录不存在或为空时 warn；`enabled=false` 时记录

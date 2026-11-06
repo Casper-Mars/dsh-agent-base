@@ -372,6 +372,21 @@ describe('runTask · 脚本任务', () => {
     expect(outcome.kind).toBe('skipped')
     expect(harness.state.status('demo').consecutiveFailures).toBe(0)
   })
+
+  it('投递返回 failed（main 从未 provisioned）→ failed/deliver', async () => {
+    const harness = await makeHarness(scriptTask(), {
+      delivery: createDelivery({ deliver: async () => 'failed' }),
+      exec: createExec({ stdout: '{"shouldWake":true,"data":"x"}\n' }),
+      validate: async (_workspace, taskPath) => ({ path: `/abs/${taskPath}` }),
+    })
+
+    const outcome = failedOf(await runTask('demo', harness.deps))
+
+    expect(outcome.failureKind).toBe('deliver')
+    expect(outcome.reason).toBe('任务 demo 投递失败')
+    expect(outcome.detail).toBe('main session 未 provisioned')
+    expect(harness.state.status('demo').consecutiveFailures).toBe(1)
+  })
 })
 
 describe('runTask · 失败通知与窗口', () => {

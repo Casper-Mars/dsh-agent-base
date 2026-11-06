@@ -366,6 +366,15 @@ async function deliverText(
     })
   }
 
+  if (result === 'failed') {
+    return fail(task, deps, log, {
+      kind: 'deliver',
+      reason: `任务 ${task.id} 投递失败`,
+      detail: 'main session 未 provisioned',
+      target,
+    })
+  }
+
   if (result === 'skipped') {
     log.warn(
       `任务 ${task.id} 投递被跳过（目标 ${target.sessionId}）`,

@@ -7,7 +7,7 @@
  *
  * 明确**不提供**投递与生命周期能力：
  *   - 没有 `ensure` / `deliver` / `bind` / `status`；
- *   - 不创建或恢复 Agent，不调用 `workspace.attachSession`；
+ *   - 服务本身不创建或恢复 Agent；main 的准备由 `apply` 的后台生命周期（`ensureMain`）完成；
  *   - 不读取 `process.cwd()`。
  *
  * 实例由 Cordis `Service` 在构造时注册到 owner fiber，fiber 卸载时自动注销。

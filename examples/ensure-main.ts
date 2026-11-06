@@ -1,9 +1,9 @@
 /**
  * 示例：消费方插件如何把消息投递到 main session。
  *
- * ⚠️ 这是**示例代码**，不是 `dsh-agent-base` 的导出，也不在包的 `exports` 里。
- * 复制到自己的插件里使用；`dsh-agent-base` 只提供 `ctx.agentBase` 的两个只读值，
- * 不创建 main、不投递、不提供 `ensure`。
+ * ⚠️ 这是**消费方投递链路的示例代码**；main session 的准备已内置在 `dsh-agent-base`
+ * （`ensureMain`，见 `src/ensure-main.ts` 并从包入口导出）。本文件保留为完整投递示例：
+ * 演示消息 source / 幂等键 / single-flight / followup；其中自带的 ensure 仅作参考。
  *
  * 覆盖的链路：
  *   1. 显式 session 优先：调用方给了 sessionId 就不读 `ctx.agentBase`；
@@ -58,6 +58,9 @@ export interface DeliverInput {
  *
  * base 不提供这个能力——并发保护是消费方的责任，否则两个 create/resume
  * 会有一个收到 already exists。
+ *
+ * 注：内置 `ensureMain` 已自带 single-flight；这里保留一份独立实现，
+ * 仅为演示消费方如何同时把显式 session 纳管。
  */
 const inflight = new WeakMap<Context, Map<SessionId, Promise<Agent>>>()
 

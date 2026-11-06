@@ -424,11 +424,11 @@ describe('apply 集成：校验时机与失败语义', () => {
     expectNoMutation(spies)
   })
 
-  it('validateExistingMain=false 时跳过校验：不读 agents / 不 stat，apply 成功', async () => {
+  it('validateExistingMain=false 时跳过校验：cwd 不一致也不失败，apply 成功', async () => {
     const base = await makeTempDir()
     const target = path.join(base, 'ws')
     const original = new Error('persistence offline')
-    const { ctx, spies, agentGet, sessionStat } = createHarness({
+    const { ctx, spies } = createHarness({
       live: liveAgent('/elsewhere'),
       statError: original,
     })
@@ -440,8 +440,8 @@ describe('apply 集成：校验时机与失败语义', () => {
     })
 
     expect(ctx.agentBase.workspaceCwd).toBe(await realpath(target))
-    expect(agentGet).not.toHaveBeenCalled()
-    expect(sessionStat).not.toHaveBeenCalled()
+    // 启动期校验被跳过：不会因 live session 的 cwd 不一致而失败。
+    // 后台 ensure 会独立做只读探测，但不属于启动期校验，也不修改任何会话。
     expectNoMutation(spies)
   })
 })

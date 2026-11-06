@@ -108,7 +108,7 @@ describe('AgentBaseService', () => {
     }
   })
 
-  it('不创建/恢复 Agent，也不 attachSession', async () => {
+  it('缺少 preset / 模型服务时后台 ensure 降级：不创建/恢复 Agent，也不 attachSession', async () => {
     const base = await makeTempDir()
     const { ctx, spies, registryCreate } = createHarness()
 

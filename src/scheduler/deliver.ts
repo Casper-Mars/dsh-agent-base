@@ -232,6 +232,7 @@ type InternalOutcome =
       readonly seq: number
     }
   | { readonly status: 'skipped'; readonly reason: SkipReason }
+  | { readonly status: 'failed'; readonly reason: string }
 
 /** 目标不可达：需要失败通知改投 main 的情形。 */
 function isUnreachable(outcome: InternalOutcome): boolean {
@@ -353,8 +354,15 @@ export function createDeliveryPort(
     else outbox.set(sessionId, kept)
   }
 
-  /** 单次投递（已持有并发占位）。`agents.get` 抛错按「投递失败」处理，永不抛。 */
-  function deliverOnce(input: DeliveryInput): InternalOutcome {
+  /**
+   * 单次投递（已持有并发占位）。`agents.get` 抛错按「投递失败」处理，永不抛。
+   *
+   * 目标为 main 且未 live 时，用 `sessionPersistence.stat` 区分两种情形：
+   *   - 有快照 → 会话存在但暂时离线，按 `deliverOnOffline` 入队（瞬态）；
+   *   - 无快照 → main 从未 provisioned（启动期准备失败），**不入队**，返回 `failed`。
+   * 调度器不创建 / 恢复会话，只如实报告。
+   */
+  async function deliverOnce(input: DeliveryInput): Promise<InternalOutcome> {
     let agent: { followup(message: unknown): void } | undefined
     try {
       agent = agents.get(input.sessionId)
@@ -375,6 +383,29 @@ export function createDeliveryPort(
           deliveryMeta(input.taskId, input.sessionId, input.fallbackFrom),
         )
         return { status: 'skipped', reason: 'delivery-error' }
+      }
+    }
+    if (input.sessionId === mainSessionId && sessionPersistence !== undefined) {
+      try {
+        const snapshot = await sessionPersistence.stat(mainSessionId)
+        if (snapshot === undefined) {
+          log.warn(
+            `dsh-agent-base: 目标 main session 未 provisioned（任务 ${input.taskId}）；` +
+              '请检查 workspace 启动阶段是否成功创建 main',
+            deliveryMeta(input.taskId, input.sessionId, input.fallbackFrom),
+          )
+          return {
+            status: 'failed',
+            reason: `main session '${mainSessionId}' 未 provisioned`,
+          }
+        }
+      } catch (error) {
+        // 无法确认是否存在：按「存在但离线」处理，保持原有的有限补投语义。
+        log.warn(
+          `dsh-agent-base: 无法确认 main session 是否存在（任务 ${input.taskId}）：` +
+            describeError(error),
+          deliveryMeta(input.taskId, input.sessionId, input.fallbackFrom),
+        )
       }
     }
     if (deliverOnOffline === 'skip') {
@@ -487,7 +518,7 @@ export function createDeliveryPort(
       // 让出一次微任务，确保并发调用能观察到占位（followup 是同步的，
       // 不 await 的话第二个调用会在占位释放后才开始）。
       await Promise.resolve()
-      return deliverOnce(input)
+      return await deliverOnce(input)
     } finally {
       inFlight.delete(key)
     }
