@@ -65,6 +65,10 @@
 
 ### Changed
 
+- **main session 准备延后到宿主加载完成**：`apply` 不再立即 `void ensureMain(...)`，改为
+  同步调度 `scheduleEnsureAfterBoot`，等 Cordis loader 全部 entry 加载完成
+  （`loader.await()`）后再后台准备 main session，避免与宿主插件（如 `tool-jobs`）的
+  controller attach 竞争；loader 缺失 / 抛错时仍会继续准备，apply 本身始终不阻塞。
 - `package.json` 版本 `0.1.0` → `0.2.0`。
 - **bundle patch 内置 `logger-console`**：`cordis.patch.yml` 的 `insert` 列表新增
   `@deepseek-ai/cordis-plugin-logger-console`（`levels.default: 3`），并与

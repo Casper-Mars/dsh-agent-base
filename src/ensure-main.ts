@@ -41,10 +41,11 @@ export interface EnsureMainOptions {
   readonly timeoutMs?: number
 }
 
-/** 最小日志出口；`info` 用于成功日志，`warn` 用于失败 / 超时。 */
+/** 最小日志出口；`info` 用于成功日志，`warn` 用于失败 / 超时，`debug` 用于启动细节。 */
 interface BootstrapLogger {
   readonly info: (message: string) => void
   readonly warn: (message: string) => void
+  readonly debug: (message: string) => void
 }
 
 const noop = (): void => {}
@@ -72,6 +73,7 @@ function safeMethod(
 function resolveBootstrapLogger(ctx: Context): BootstrapLogger {
   const fallback: BootstrapLogger = {
     info: noop,
+    debug: noop,
     warn: (message) => {
       try {
         if (typeof console.warn === 'function') console.warn(message)
@@ -101,6 +103,7 @@ function resolveBootstrapLogger(ctx: Context): BootstrapLogger {
     return {
       info: safeMethod(record.info ?? produced, record.info === undefined ? undefined : produced),
       warn: safeMethod(record.warn ?? produced, record.warn === undefined ? undefined : produced),
+      debug: safeMethod(record.debug, produced),
     }
   }
   if (typeof produced !== 'object' || produced === null) return fallback
@@ -109,6 +112,7 @@ function resolveBootstrapLogger(ctx: Context): BootstrapLogger {
   return {
     info: safeMethod(record.info, produced),
     warn: safeMethod(record.warn, produced),
+    debug: safeMethod(record.debug, produced),
   }
 }
 
@@ -361,4 +365,53 @@ export function ensureMain(ctx: Context, options: EnsureMainOptions = {}): Promi
   )
 
   return withTimeout(settled, timeoutMs, log)
+}
+
+/**
+ * 等宿主（Cordis loader）全部 entry 加载完成后再后台准备 main session。
+ *
+ * 为什么需要延迟：`apply()` 本身也是一个 pending entry。若在 `apply` 内立即
+ * `void ensureMain(...)`，main session 会在 `tool-jobs` 等宿主插件 attach controller
+ * 之前就被创建，后台任务随后可能报 `no job controller serves this agent`。
+ *
+ * 调度策略：
+ *   1. 尝试读取可选的 `loader` 服务（`ctx.get('loader')`，缺失 / 形状不符都不抛）；
+ *   2. 存在 `loader.await` 时，**不能在 apply 内直接 await**（apply 自己的 entry 尚未
+ *      完成，会互相等待而死锁），因此放进 `queueMicrotask`，等 apply 同步返回后再
+ *      `loader.await().then(run, run)`；
+ *   3. 没有 loader 时同样 `queueMicrotask(run)`，保持「不阻塞 apply」的语义。
+ *
+ * 本函数同步返回、不 await；`ensureMain` 自身永不 reject，loader 抛错 / reject
+ * 也只会在 catch 后继续 run，不会让异常冒到 `apply`。
+ *
+ * @param ctx       插件 fiber 上的 Context（`apply` 中已发布 `ctx.agentBase`）。
+ * @param timeoutMs 传给 {@link ensureMain} 的准备超时。
+ */
+export function scheduleEnsureAfterBoot(ctx: Context, timeoutMs?: number): void {
+  const log = resolveBootstrapLogger(ctx)
+  const run = (): void => {
+    try {
+      void ensureMain(ctx, { timeoutMs })
+    } catch (error) {
+      // ensureMain 设计上不抛；这里只兜底，避免 queueMicrotask 回调产生未捕获异常。
+      log.warn(`main session 准备失败：${describeError(error)}`)
+    }
+  }
+
+  const loader = getService(ctx, 'loader') as { await?: unknown } | undefined
+
+  if (loader === undefined || loader === null || typeof loader.await !== 'function') {
+    queueMicrotask(run)
+    return
+  }
+
+  log.debug('等待宿主加载完成后准备 main session')
+  queueMicrotask(() => {
+    try {
+      Promise.resolve((loader as { await: () => unknown }).await.call(loader)).then(run, run)
+    } catch {
+      // loader.await 同步抛错也要继续准备。
+      run()
+    }
+  })
 }

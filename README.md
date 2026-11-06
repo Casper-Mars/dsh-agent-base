@@ -1,8 +1,8 @@
 # dsh-agent-base
 
 固定 Workspace 与 main session id 的 dsh 插件包。核心是**身份与路径的权威来源**。
-workspace 生命周期会在 `apply()` 之后**后台准备 main session**（复用 live / `resume` / `create`，
-不阻塞插件启动）。0.2.0 起内置定时调度子系统，可向会话投递任务结果与失败通知；
+workspace 生命周期会在 `apply()` 返回、宿主（Cordis loader）全部 entry 加载完成后
+**后台准备 main session**（复用 live / `resume` / `create`，不阻塞插件启动）。0.2.0 起内置定时调度子系统，可向会话投递任务结果与失败通知；
 目标未 live 时进入内存 outbox 或按配置跳过（见「[定时任务（scheduler）](#定时任务scheduler)」）。
 
 > **适用范围：仅 web profile。** 本包通过 bundle patch 禁用 `directory-picker`，
@@ -24,7 +24,8 @@ script 两类任务、失败通知、离线补投与 8 个 `task_*` 工具。mai
 
 启动时按 `config.workspace` 校验绝对路径 → `mkdir -p`（可选）→ `realpath` →
 `workspaceRegistry.create(canonical)` → 校验同 id 的 main session 的 cwd 是否与之一致 →
-发布只读的 `ctx.agentBase` service → **后台准备 main session（不 await）** → 装配调度子系统。
+发布只读的 `ctx.agentBase` service → 装配调度子系统 → 等宿主加载完成后
+**后台准备 main session（不 await）**。
 
 ### 启动序列
 
@@ -42,11 +43,14 @@ apply()
   │    │    └─ 有快照 → 比较 header.cwd
   │    └─ cwd 不一致 → AgentBaseWorkspaceMismatchError
   ├─ new AgentBaseService(ctx, { workspaceCwd: workspace.path, mainSessionId })
-  ├─ void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })   // 后台，不 await
-  │    ├─ agents.get(mainSessionId) 命中 → 复用 live Agent
-  │    ├─ 有快照 → canonical cwd 校验 → agents.resume(...)
-  │    └─ 无快照 → agents.create(...) → workspace.attachSession(mainSessionId)
-  └─ mountScheduler(...)
+  ├─ mountScheduler(...)
+  └─ scheduleEnsureAfterBoot(ctx, config.ensureTimeoutMs)   // 同步返回，不 await
+       ├─ ctx.get('loader') 存在且带 await → queueMicrotask → loader.await()
+       │    （apply 自身也是一个 pending entry，不能在 apply 内直接 await，否则死锁）
+       └─ 宿主全部 entry 加载完成 → ensureMain(ctx, { timeoutMs })
+            ├─ agents.get(mainSessionId) 命中 → 复用 live Agent
+            ├─ 有快照 → canonical cwd 校验 → agents.resume(...)
+            └─ 无快照 → agents.create(...) → workspace.attachSession(mainSessionId)
 ```
 
 校验严格在 service 实例化**之前**完成：失败时不会留下已注册的 `ctx.agentBase`。
@@ -210,8 +214,12 @@ dsh plugin --profile web remove dsh-agent-base
 
 ### main session 启动准备
 
-`apply()` 发布 `ctx.agentBase` 后，立即以 `void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })`
-在**后台**准备 main session。它不 await、不阻塞插件启动，也不影响 `mountScheduler`：
+`apply()` 发布 `ctx.agentBase`、装配调度子系统后，同步调用
+`scheduleEnsureAfterBoot(ctx, config.ensureTimeoutMs)`。它会等 Cordis loader 的全部 entry
+加载完成（`loader.await()`）后，再在**后台**执行 `ensureMain`；apply 自身不 await、
+不阻塞插件启动。延迟的目的是避免 main session 在 `tool-jobs` 等宿主插件 attach
+自己的 controller 之前就被创建。loader 服务缺失时退化为 `queueMicrotask` 直接准备，
+`loader.await` 抛错 / reject 时也仍然继续准备：
 
 ```text
 agents.get(mainSessionId) 命中 → 复用 live Agent

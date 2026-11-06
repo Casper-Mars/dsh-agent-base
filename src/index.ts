@@ -8,11 +8,15 @@
  *   2. `validateExistingMain` 校验已存在的 main session 的 cwd 是否与之一致
  *      （只读守卫：不创建、不恢复、不 attachSession、不改 header）；
  *   3. 两步都成功后实例化 {@link AgentBaseService}，由 Cordis fiber 管理生命周期；
- *   4. 以 `void ensureMain(...)` 在后台准备 main session（不 await，不阻塞启动）；
- *   5. 装配调度子系统。
+ *   4. 装配调度子系统；
+ *   5. 调度「等宿主加载完成后再后台准备 main session」（不 await，不阻塞启动）。
  *
- * 顺序固定为「resolve → validate → service → ensure(background) → scheduler」，
+ * 顺序固定为「resolve → validate → service → scheduler → ensure(deferred)」，
  * 校验失败时不会留下已注册的服务。
+ *
+ * 注意：`apply` 返回后，等 Cordis loader 的全部 entry 加载完成（`loader.await()`）
+ * 再在后台准备 main session。这样 main 创建时 `tool-jobs` 等宿主插件已经 attach
+ * 好自己的 controller，避免启动期竞争。
  *
  * 仍然不做：在调度器里创建 / 恢复会话（调度器只投递）；核心自身不投递消息
  * （0.2.0 起调度子系统可投递，见 `src/scheduler/`）。
@@ -27,7 +31,7 @@ import { AgentBaseService } from './service.js'
 import { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
 import { AgentBaseError } from './errors.js'
 import { validateExistingMain } from './validate.js'
-import { ensureMain } from './ensure-main.js'
+import { scheduleEnsureAfterBoot } from './ensure-main.js'
 import type { Config } from './config.js'
 import { resolveSchedulerConfig } from './config.js'
 import { mountScheduler } from './scheduler/mount.js'
@@ -64,7 +68,11 @@ export {
 export type { SchedulerConfig } from './config.js'
 export { AgentBaseService } from './service.js'
 export type { AgentBaseOptions } from './service.js'
-export { DEFAULT_ENSURE_TIMEOUT_MS, ensureMain } from './ensure-main.js'
+export {
+  DEFAULT_ENSURE_TIMEOUT_MS,
+  ensureMain,
+  scheduleEnsureAfterBoot,
+} from './ensure-main.js'
 export type { EnsureMainOptions } from './ensure-main.js'
 export { AgentBaseConfigError, resolveFixedWorkspace } from './workspace.js'
 export type {
@@ -109,12 +117,14 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
       mainSessionId: config.mainSessionId as SessionId,
     })
 
-    // workspace 生命周期：后台准备 main session。不 await、不阻塞插件启动；
-    // 失败 / 超时只在日志里 warn（ensureMain 自身保证永不 reject）。
-    void ensureMain(ctx, { timeoutMs: config.ensureTimeoutMs })
-
     // 调度子系统：任何异常都只 warn 降级，绝不阻断插件启动。
     mountScheduler(ctx, resolveSchedulerConfig(config.scheduler), workspace.path)
+
+    // workspace 生命周期：apply 返回后，等宿主（Cordis loader）全部 entry 加载完成，
+    // 再在后台准备 main session。不 await、不阻塞插件启动；失败 / 超时只在日志里
+    // warn（ensureMain 自身保证永不 reject）。延迟可避免与 tool-jobs 等宿主插件的
+    // controller attach 竞争。
+    scheduleEnsureAfterBoot(ctx, config.ensureTimeoutMs)
   } catch (error) {
     if (error instanceof AgentBaseError) throw error
     throw new AgentBaseConfigError(
