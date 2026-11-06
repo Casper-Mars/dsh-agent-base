@@ -62,8 +62,8 @@
 - `package.json` 版本 `0.1.0` → `0.2.0`。
 - **bundle patch 内置 `logger-console`**：`cordis.patch.yml` 的 `insert` 列表新增
   `@deepseek-ai/cordis-plugin-logger-console`（`levels.default: 3`），并与
-  `@deepseek-ai/cordis-plugin-logger-console` 建立 `^1.0.4` 运行时依赖。
-  安装本插件即输出 INFO / WARN / ERROR 日志，无需再改 profile；profile 已有同 id 行时
+  `@deepseek-ai/cordis-plugin-logger-console` 建立 `~1.0.4` 运行时依赖。
+  安装本插件即输出 INFO / WARN / ERROR / DEBUG 日志，无需再改 profile；profile 已有同 id 行时
   按 id 覆盖、不重复输出，仍可用 `disabled: true` 或同 id 配置覆盖默认值。
 - `Config` 新增可选 `scheduler` 子配置；缺省时使用 `DEFAULT_SCHEDULER_CONFIG`。
 - 插件 `apply` 在发布 `ctx.agentBase` 后装配调度子系统；`ctx.agentBase` 的

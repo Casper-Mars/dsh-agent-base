@@ -5,7 +5,7 @@
 #     directory-flow 槽位没有 occupant 后，`Add workspace` 按钮与快捷键入口
 #     自动消失（官方支持的组合级关闭方式）；
 #   - 插入 logger-console 行：**安装本插件即启用 console 日志**，无需再改
-#     profile。`levels.default: 3` 为 DEBUG 阈值，INFO / WARN / ERROR 均输出；
+#     profile。`levels.default: 3` 为 DEBUG 阈值，INFO / WARN / ERROR / DEBUG 均输出；
 #   - 插入 agent-base 行，由 `dsh plugin --profile web add <本包>` 自动叠加。
 #
 # 日志行的分层语义：patch 按 id 覆盖，不按位置叠加。宿主 profile 若已有一行
