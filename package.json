@@ -1,8 +1,8 @@
 {
   "name": "dsh-agent-base",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "type": "module",
-  "description": "固定 Workspace 与 main session id 的基础插件（dsh）：只提供身份与路径，不创建 Agent、不投递消息",
+  "description": "固定 Workspace 与 main session id 的基础插件（dsh）：提供身份与路径，并内置文件驱动的定时任务调度（text / script）",
   "keywords": [
     "dsh",
     "dsh-plugin",

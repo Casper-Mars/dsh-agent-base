@@ -1003,7 +1003,7 @@ function createTaskRunNowTool(options: SchedulerToolsOptions): ToolDefinition {
   return {
     name: 'task_run_now',
     description:
-      '立即执行一次指定任务并返回运行结局（quiet / woke / queued / skipped / failed / missed）。' +
+      '立即执行一次指定任务并返回运行结局（quiet / woke / queued / skipped / failed）。' +
       '任务必须已存在；该操作不影响 cron 计时，也不会修改任务定义。',
     parameters: {
       type: 'object',

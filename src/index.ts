@@ -11,7 +11,8 @@
  *
  * 顺序固定为「resolve → validate → service」，校验失败时不会留下已注册的服务。
  *
- * 仍然不做：创建/恢复 main session、任何投递能力。
+ * 仍然不做：创建/恢复 main session；核心自身不投递消息（0.2.0 起调度子系统可向已 live
+ * 会话投递，见 `src/scheduler/`）。
  */
 import type { Context } from '@deepseek-ai/cordis'
 import type { SessionId } from '@deepseek-ai/dsh-session'
