@@ -1,10 +1,17 @@
-# dsh-agent-base bundle patch —— 固定工作区 + main session id
+# dsh-agent-base bundle patch —— 固定工作区 + main session id + console 日志
 #
 # 仅用于 web profile：
 #   - 禁用 directory-picker（@deepseek-ai/dsh-host-directory-picker-auto），
 #     directory-flow 槽位没有 occupant 后，`Add workspace` 按钮与快捷键入口
 #     自动消失（官方支持的组合级关闭方式）；
+#   - 插入 logger-console 行：**安装本插件即启用 console 日志**，无需再改
+#     profile。`levels.default: 3` 为 DEBUG 阈值，INFO / WARN / ERROR 均输出；
 #   - 插入 agent-base 行，由 `dsh plugin --profile web add <本包>` 自动叠加。
+#
+# 日志行的分层语义：patch 按 id 覆盖，不按位置叠加。宿主 profile 若已有一行
+# 同 id 的 logger-console（来自别的 bundle 或用户自己的 patch），本行按 id
+# 覆盖 / 合并，不会重复安装、也不会重复输出；反之 profile 也可用同 id 行
+# 覆盖这里的 colors / levels / showTime，或用 `disabled: true` 关掉。
 #
 # id/name/inject 必须与 src/index.ts 逐项一致。
 #
@@ -15,6 +22,13 @@
   disabled: true
 
 - insert:
+    - id: logger-console
+      name: '@deepseek-ai/cordis-plugin-logger-console'
+      config:
+        colors: false
+        levels:
+          default: 3
+        showTime: 'yyyy-MM-dd hh:mm:ss '
     - id: agent-base
       name: dsh-agent-base
       inject: ['workspaceRegistry', 'sessionPersistence', 'agents']

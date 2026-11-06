@@ -151,6 +151,11 @@ dsh plugin --profile web add /Users/reachlucifer/project/opc/dsh-agent-base
 profile `package.json` 的 `dsh.profile.bundles`，无需手工编辑
 `$DSH_HOME/profiles/web/cordis.patch.yml`。
 
+安装后**自动启用 `logger-console`**（`@deepseek-ai/cordis-plugin-logger-console`，
+`levels.default: 3`，INFO / WARN / ERROR 输出到终端），不需要再改 profile 就能看到
+启动与调度日志。该行按 id 分层覆盖：profile 已有同 id 行时以 profile 为准、不会重复输出；
+如需自定义格式或关闭，在 profile 的 `cordis.patch.yml` 写一行同 id 配置或 `disabled: true`。
+
 ## 卸载
 
 ```bash
@@ -509,6 +514,7 @@ ctx.agentScheduler.runNow(id)         // 立即执行一次
 | 现象 | 排查方向 |
 | --- | --- |
 | 完全没有调度日志 | 先搜 `调度器已启动` / `任务清单加载完成`；若都没有，说明 `ctx.logger` 不是可识别的形态（此时 warn / error 会走 `console` 兜底） |
+| 完全没有任何日志输出 | 本包已内置 `logger-console`，正常情况下装完即有日志。若仍无输出：① 检查 profile 的 `cordis.patch.yml` 是否把 `logger-console` 行 `disabled: true` 关掉了，或覆盖成不含 INFO 的 `levels`；② 检查宿主是否把 stdout / stderr 重定向到文件或 `/dev/null`（`dsh ... > /dev/null 2>&1`、systemd / docker 的日志驱动等）；③ 确认终端 `TERM` / `NO_COLOR` 未导致输出异常 |
 | 任务不触发 | `task_get` 看 `enabled` / `cron`；`ctx.agentScheduler.scheduledIds` 是否包含该 id；`nextRunAt(id)` 是否为 `undefined`；cron 是否 5 段且合法 |
 | 日志提示任务目录不存在 / 为空 / 不是目录 / 不可访问 | 创建 `<workspace>/.agent-base/tasks/`，或用 `task_create` 新建任务；若该路径被普通文件占用则先移走；不可访问时检查目录权限（需可读 + 可执行） |
 | 改了 JSON 没生效 | 运行中的调度器不监听文件变化；用 `task_update` 或调用 `reload()` 重新加载 |

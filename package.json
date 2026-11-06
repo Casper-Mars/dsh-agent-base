@@ -53,6 +53,7 @@
     "prepublishOnly": "pnpm build"
   },
   "dependencies": {
+    "@deepseek-ai/cordis-plugin-logger-console": "^1.0.4",
     "@deepseek-ai/schemastery": "~3.18.5"
   },
   "peerDependencies": {
