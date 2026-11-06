@@ -78,7 +78,8 @@
 - `Config` 新增可选 `scheduler` 子配置；缺省时使用 `DEFAULT_SCHEDULER_CONFIG`。
 - 插件 `apply` 在发布 `ctx.agentBase` 后装配调度子系统；`ctx.agentBase` 的
   `workspaceCwd` / `mainSessionId` 契约与只读语义不变，调度器从它读取默认投递目标。
-- `apply` 在发布服务后以 `void ensureMain(...)` 后台准备 main session（不 await）；
+- `apply` 在发布服务后**不立即**准备 main：先装配调度器，并调度「等 Cordis loader
+  全部 entry 加载完成（`loader.await()`）后再后台准备 main session」（不 await）；
   插件 `inject` 增加 `agentPresets` / `agentDefaultModel`。
 - **调度器对「main 从未 provisioned」明确失败**：目标为 main、agent 未 live 且
   `sessionPersistence.stat` 无快照时，`DeliveryResult` 返回 `'failed'`，不进入 outbox；

@@ -1,8 +1,8 @@
 /**
  * main session 的**启动期准备**（workspace 生命周期的一部分，不属于调度器）。
  *
- * `apply()` 在发布 `ctx.agentBase` 后以 `void ensureMain(...)` 的方式在后台调用本模块：
- * 不 await、不拖慢插件启动；成功与失败都只写日志，**永不向调用方抛异常**。
+ * `apply()` 返回后，等 Cordis loader 全部 entry 加载完成（`loader.await()`），再在
+ * 后台调用本模块：不 await、不拖慢插件启动；成功与失败都只写日志，**永不向调用方抛异常**。
  *
  * 状态机（与方案 §3.4 一致）：
  *
