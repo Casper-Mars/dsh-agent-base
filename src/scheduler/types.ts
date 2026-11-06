@@ -154,8 +154,15 @@ export type TaskRunOutcome =
       readonly reason: string
       /** 补充细节。 */
       readonly detail?: string
-      /** 消息原定投递时刻。 */
-      readonly scheduledAt?: Date
+      /**
+       * 消息原定投递时刻（**必填**）。
+       *
+       * `missed` 表示离线队列条目已过期，该条目必然有过原定投递时刻；缺省会让
+       * 类型层与 `task_run_now` 的 output schema（missed 分支 required 含
+       * `scheduledAt`）口径分裂，构造出的结局会在输出校验期被判
+       * `must match exactly one oneOf branch (matched 0)`。故这里强制必填。
+       */
+      readonly scheduledAt: Date
     }
 
 /** 时钟源（可注入，便于冷却与通知窗口的边界测试）。 */

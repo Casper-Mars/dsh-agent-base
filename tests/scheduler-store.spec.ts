@@ -262,6 +262,15 @@ describe('list · 文件内 id 与文件名一致性', () => {
     expect(warnings).toEqual([])
   })
 
+  it('get 对「文件名与内部 id 不一致」返回 undefined（与 list 口径一致）', () => {
+    const { tasksDir, store } = tempStore()
+    writeFileSync(join(tasksDir, 'dup.json'), `${JSON.stringify(TASK, null, 2)}\n`, 'utf8')
+    // dup.json 内声明 id = demo：list 判损坏，get('dup') 也必须不可见。
+    expect(store.list().corrupted).toEqual(['dup'])
+    expect(store.get('dup')).toBeUndefined()
+    expect(store.get('demo')).toBeUndefined()
+  })
+
   it('结构非法与 id 不一致同时存在 → 全部计入 corrupted', () => {
     const { tasksDir, store } = tempStore()
     writeFileSync(join(tasksDir, 'broken.json'), '{ not json', 'utf8')
@@ -270,6 +279,22 @@ describe('list · 文件内 id 与文件名一致性', () => {
     const listed = store.list()
     expect(listed.tasks).toEqual([])
     expect(listed.corrupted.sort()).toEqual(['broken', 'other'])
+  })
+})
+
+describe('写入错误收敛', () => {
+  it('tasksDir 本身是普通文件时 save 抛 TaskStoreError（不是裸 EEXIST）', () => {
+    const workspace = tempWorkspace()
+    const tasksDir = join(workspace, 'not-a-dir')
+    writeFileSync(tasksDir, 'i am a file', 'utf8')
+    const store = createTaskStore({ tasksDir })
+    expect(() => store.save(TASK)).toThrow(TaskStoreError)
+    try {
+      store.save(TASK)
+    } catch (error) {
+      expect((error as Error).message).toMatch(/写入任务 demo 失败/)
+    }
+    expect(readFileSync(tasksDir, 'utf8')).toBe('i am a file')
   })
 })
 

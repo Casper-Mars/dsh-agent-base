@@ -359,8 +359,8 @@ describe('SchedulerService · 并发补测', () => {
   })
 })
 
-describe('SchedulerService · 已知风险探针', () => {
-  it.fails('stop→start 后，旧在飞任务完成不得覆盖更新的 lastOutcome', async () => {
+describe('SchedulerService · 代际写保护', () => {
+  it('stop→start 后，旧在飞任务完成不得覆盖更新的 lastOutcome', async () => {
     const { delivery, releases } = deferredDelivery()
     const task = textTask()
     const harness = await makeService({ tasks: [task], delivery })

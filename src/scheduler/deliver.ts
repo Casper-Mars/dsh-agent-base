@@ -276,17 +276,47 @@ export function createDeliveryPort(
     return `${input.taskId}\u0000${input.sessionId}\u0000${input.text}`
   }
 
+  /**
+   * 该任务在全部桶中的**有效**待补投条数。
+   *
+   * 过期条目在 `expire` / `flush` 之前仍物理留在 outbox，但不应继续占用
+   * 每任务 20 条额度——否则目标长时间离线时，旧条目会把新消息全部挤成
+   * overflow，且 flush 时它们本来也会被直接丢弃。
+   */
   function countPendingForTask(taskId: string): number {
+    const nowMs = clock.now().getTime()
     let total = 0
     for (const bucket of outbox.values()) {
       for (const entry of bucket) {
-        if (entry.taskId === taskId) total += 1
+        if (entry.taskId !== taskId) continue
+        if (nowMs - entry.enqueuedAt >= pendingTtlMs) continue
+        total += 1
       }
     }
     return total
   }
 
+  /**
+   * 入队前物理清掉该任务已过期的条目。
+   *
+   * 若只「计数时排除过期」而不清理，目标长期离线且从未触发 expire / flush 时，
+   * 过期条目会无界堆积并绕过每任务 20 条上限。这里在入口先做一次定向清扫，
+   * 既释放额度也约束内存（语义与 expire 一致：过期消息本就只记 missed、不补投）。
+   */
+  function dropExpiredForTask(taskId: string): void {
+    const nowMs = clock.now().getTime()
+    for (const [sessionId, bucket] of outbox) {
+      const kept = bucket.filter(
+        (entry) => entry.taskId !== taskId || nowMs - entry.enqueuedAt < pendingTtlMs,
+      )
+      if (kept.length === bucket.length) continue
+      if (kept.length === 0) outbox.delete(sessionId)
+      else outbox.set(sessionId, kept)
+    }
+  }
+
   function enqueue(input: DeliveryInput): InternalOutcome {
+    dropExpiredForTask(input.taskId)
     if (countPendingForTask(input.taskId) >= maxPendingPerTask) {
       log.warn(
         `dsh-agent-base: missed 投递（任务 ${input.taskId} 的离线队列已达上限 ${maxPendingPerTask} 条）`,

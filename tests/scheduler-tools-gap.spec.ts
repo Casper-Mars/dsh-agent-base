@@ -16,7 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertObjectJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
+import { assertObjectJsonSchema, assertSupportedJsonSchema, validateJsonSchemaValue } from '@deepseek-ai/dsh-tools'
 import { createTaskStore, resolveTasksDir } from '../src/scheduler/store.js'
 import { SCHEDULER_TOOL_NAMES, createSchedulerTools } from '../src/scheduler/tools.js'
 import type { SchedulerToolsOptions } from '../src/scheduler/tools.js'
@@ -540,18 +540,28 @@ const RUN_OUTCOMES: TaskRunOutcome[] = [
     notified: true,
     consecutiveFailures: 3,
   },
-  { kind: 'missed', reason: '离线消息过期', detail: 'outbox 丢弃' },
+  {
+    kind: 'missed',
+    reason: '离线消息过期',
+    detail: 'outbox 丢弃',
+    scheduledAt: new Date('2026-01-01T00:00:00Z'),
+  },
 ]
 
 describe('task_run_now 六态', () => {
-  it('六态结局均原样返回且通过 output.schema', async () => {
-    for (const [index, outcome] of RUN_OUTCOMES.entries()) {
+  it('六态结局均按契约返回且通过 output.schema', async () => {
+    for (const outcome of RUN_OUTCOMES) {
       const fixture = makeFixture()
       fixture.store.save({ ...RICH_SCRIPT })
       const tools = makeTools(fixture, { runNow: async () => outcome })
       const value = await call(tools, 'task_run_now', { id: RICH_SCRIPT.id })
-      expect(value).toBe(outcome)
-      expect(value).toEqual(RUN_OUTCOMES[index])
+      // missed 的 Date 在输出边界序列化为 ISO；其余结局保持对象身份。
+      const expected =
+        outcome.kind === 'missed' && outcome.scheduledAt instanceof Date
+          ? { ...outcome, scheduledAt: outcome.scheduledAt.toISOString() }
+          : outcome
+      expect(value).toEqual(expected)
+      if (expected === outcome) expect(value).toBe(outcome)
       // 不修改任务定义。
       expect(readTaskFile(fixture, RICH_SCRIPT.id)).toMatchObject({
         enabled: true,
@@ -596,12 +606,9 @@ describe('task_run_now 六态', () => {
     await expect(call(tools, 'task_run_now', { id: 'ghost' })).rejects.toThrow(/任务 ghost 不存在/)
   })
 
-  // 已知风险（latent，非当前验收阻断项）：TaskRunOutcome 的 missed 允许
-  // `scheduledAt: Date`，而 output.schema 是 JSON Schema（无 Date 类型），
-  // dsh-tools 的输出校验会以「must be a lossless JSON object」拒绝。
-  // 当前调度实现尚未产出带 scheduledAt 的 missed，故用 it.fails 固化风险，
-  // 一旦工具层改为序列化 ISO 字符串，本用例会转为失败以提示更新。
-  it.fails('已知风险：missed 携带 Date 型 scheduledAt 时输出不是 lossless JSON', async () => {
+  // 内部 `TaskRunOutcome.missed.scheduledAt` 是 Date；工具层在输出边界将其
+  // 序列化为 ISO 字符串，schema 也声明为 string，因此输出是 lossless JSON。
+  it('missed 携带 Date 型 scheduledAt 时输出序列化为 ISO 字符串（lossless JSON）', async () => {
     const fixture = makeFixture()
     fixture.store.save({ ...RICH_SCRIPT })
     const missed: TaskRunOutcome = {
@@ -610,7 +617,46 @@ describe('task_run_now 六态', () => {
       scheduledAt: new Date('2026-01-01T00:00:00Z'),
     }
     const tools = makeTools(fixture, { runNow: async () => missed })
-    await call(tools, 'task_run_now', { id: RICH_SCRIPT.id })
+    const value = (await call(tools, 'task_run_now', { id: RICH_SCRIPT.id })) as {
+      kind: string
+      scheduledAt: unknown
+    }
+    expect(value.kind).toBe('missed')
+    expect(typeof value.scheduledAt).toBe('string')
+    expect(value.scheduledAt).toBe('2026-01-01T00:00:00.000Z')
+    // 原始 outcome 不被修改（序列化发生在输出边界，不是原地改写）。
+    expect(missed.scheduledAt).toBeInstanceOf(Date)
+  })
+
+  // 防御性契约：类型层已禁止构造无 scheduledAt 的 missed（见
+  // `tests/consumer-types.ts` 的 @ts-expect-error 回归守卫），但 JS 调用方 /
+  // 绕过类型的路径仍可能传进来；工具输出校验必须拒绝，而不是把不合约的结局
+  // 当合法输出透传（真实链路在 dsh-tools 输出校验期抛 ToolOutputError）。
+  it('missed 缺 scheduledAt：output.schema 拒绝（类型层已不可构造的兜底校验）', async () => {
+    const fixture = makeFixture()
+    fixture.store.save({ ...RICH_SCRIPT })
+    const legacyMissed = {
+      kind: 'missed',
+      reason: '离线消息过期',
+    } as unknown as TaskRunOutcome
+    const tools = makeTools(fixture, { runNow: async () => legacyMissed })
+    const definition = tool(tools, 'task_run_now')
+    // 工具层不补造时刻（serializeRunOutcome 只把 Date 序列化为 ISO），
+    // 因此输出仍是缺字段的对象，必然无法命中 missed 分支。
+    const value = await definition.execute({ id: RICH_SCRIPT.id }, {} as never)
+    const violations = validateJsonSchemaValue(definition.output.schema as never, value as never)
+    expect(violations.length).toBeGreaterThan(0)
+    expect(violations.join('\n')).toMatch(/oneOf/i)
+  })
+
+  it('非 missed / 无 Date 的结局保持对象身份不变', async () => {
+    const fixture = makeFixture()
+    fixture.store.save({ ...RICH_SCRIPT })
+    for (const outcome of RUN_OUTCOMES) {
+      if (outcome.kind === 'missed' && outcome.scheduledAt instanceof Date) continue
+      const tools = makeTools(fixture, { runNow: async () => outcome })
+      expect(await call(tools, 'task_run_now', { id: RICH_SCRIPT.id })).toBe(outcome)
+    }
   })
 
   it('run_now 不触发 onChange', async () => {
@@ -631,14 +677,73 @@ describe('task_run_now 六态', () => {
 // ---------------------------------------------------------------------------
 
 describe('ToolDefinition 契约', () => {
-  it('8 个工具的 parameters / output.schema 均属于 dsh-tools 支持的 object schema 子集', () => {
+  it('parameters 为 object-root 子集；output.schema 通过注册期支持子集校验', () => {
     const fixture = makeFixture()
     const tools = makeTools(fixture)
     expect(tools.map((item) => item.name)).toEqual([...SCHEDULER_TOOL_NAMES])
     for (const item of tools) {
       expect(() => assertObjectJsonSchema(item.parameters as never)).not.toThrow()
-      expect(() => assertObjectJsonSchema(item.output.schema as never)).not.toThrow()
+      // dsh-tools 在注册工具时对 output.schema 只要求「受支持子集」（任意 JSON 根），
+      // 不强制 object-root；task_run_now 用 oneOf 根表达判别联合正是依赖这一点。
+      expect(() => assertSupportedJsonSchema(item.output.schema as never)).not.toThrow()
     }
+  })
+
+  it('task_run_now output.schema 为按 kind 收口的 oneOf 判别联合', () => {
+    const fixture = makeFixture()
+    const tools = makeTools(fixture)
+    const schema = tool(tools, 'task_run_now').output.schema as {
+      oneOf?: Array<{
+        properties?: { kind?: { const?: string } }
+        required?: string[]
+      }>
+    }
+    expect(schema.oneOf).toHaveLength(6)
+    const requiredByKind = Object.fromEntries(
+      (schema.oneOf ?? []).map((branch) => [
+        branch.properties?.kind?.const,
+        branch.required,
+      ]),
+    )
+    expect(requiredByKind).toEqual({
+      quiet: ['kind', 'reason'],
+      woke: ['kind', 'reason', 'data', 'targets'],
+      queued: ['kind', 'reason', 'targets'],
+      skipped: ['kind', 'reason'],
+      failed: ['kind', 'reason', 'failureKind', 'notified', 'consecutiveFailures'],
+      missed: ['kind', 'reason', 'scheduledAt'],
+    })
+
+    // 判别力：缺 failureKind 的 failed、缺 scheduledAt 的 missed、缺 targets 的
+    // queued 都必须被拒；完整对象通过。
+    // 注意 missed 的 scheduledAt 在 `TaskRunOutcome`（类型层）已改为必填，
+    // 正常 TS 调用方无法再构造缺该字段的结局；此处保留断言是为守住「schema 与
+    // 类型口径一致」的防御性契约（见下方 missed 缺 scheduledAt 的专测）。
+    expect(
+      validateJsonSchemaValue(schema as never, { kind: 'failed', reason: 'x' } as never),
+    ).not.toEqual([])
+    expect(
+      validateJsonSchemaValue(schema as never, { kind: 'missed', reason: 'x' } as never),
+    ).not.toEqual([])
+    expect(
+      validateJsonSchemaValue(schema as never, { kind: 'queued', reason: 'x' } as never),
+    ).not.toEqual([])
+    expect(
+      validateJsonSchemaValue(schema as never, {
+        kind: 'failed',
+        reason: 'x',
+        failureKind: 'exec',
+        notified: false,
+        consecutiveFailures: 1,
+      } as never),
+    ).toEqual([])
+    expect(
+      validateJsonSchemaValue(schema as never, {
+        kind: 'missed',
+        reason: 'x',
+        scheduledAt: '2026-01-01T00:00:00.000Z',
+      } as never),
+    ).toEqual([])
   })
 
   it('8 个工具的 execute 均为异步函数并返回 Promise', () => {
@@ -702,7 +807,8 @@ describe('ToolDefinition 契约', () => {
     expect(tool(tools, 'task_get').output.schema.required).toEqual(['task'])
     expect(tool(tools, 'task_delete').output.schema.required).toEqual(['ok', 'id'])
     expect(tool(tools, 'task_list').output.schema.required).toEqual(['tasks'])
-    expect(tool(tools, 'task_run_now').output.schema.required).toEqual(['kind', 'reason'])
+    // task_run_now 的 required 已下沉到 oneOf 各分支（见上方判别联合用例）。
+    expect(tool(tools, 'task_run_now').output.schema.oneOf).toHaveLength(6)
   })
 
   it('渲染函数覆盖空列表 / 损坏列表 / 两种 kind 的读取结果', async () => {
@@ -766,10 +872,9 @@ describe('TaskView 细节', () => {
     await expect(call(tools, 'task_get', { id: 'corrupted' })).rejects.toThrow(/任务 corrupted 不存在/)
   })
 
-  // 已知风险：warnings 只做 L2（存在 / 普通文件 / 可读），不做 L1 扩展名检查。
-  // 手工落盘 / 迁移来的 `legacy.py` 任务在视图里 warnings 为空，但 runner 触发时
-  // 会因扩展名白名单直接 failed/runtime。建议 scriptWarnings 复用 validateScript。
-  it.fails('已知风险：script 扩展名非法（手工落盘）时 warnings 未提示不可用', async () => {
+  // scriptWarnings 复用 validateScript（L1 形态 + L2 存在性），与触发期校验同口径：
+  // 手工落盘 / 迁移来的 `legacy.py` 在视图里就会提示不可用，而不是等到 failed/runtime。
+  it('script 扩展名非法（手工落盘）时 warnings 提示不可用', async () => {
     const fixture = makeFixture()
     writeFileSync(join(fixture.workspace, 'programs', 'legacy.py'), 'print(1)\n', 'utf8')
     fixture.store.save({
@@ -783,7 +888,51 @@ describe('TaskView 细节', () => {
     const value = (await call(tools, 'task_get', { id: 'legacy-py' })) as {
       task: { warnings: string[] }
     }
-    expect(value.task.warnings.join('\n')).toMatch(/不可用|扩展名/)
+    expect(value.task.warnings.join('\n')).toMatch(/不可用/)
+    expect(value.task.warnings.join('\n')).toMatch(/扩展名/)
+  })
+
+  it('程序文件缺失时仅改名 / 改 cron 仍成功，warnings 提示不可用', async () => {
+    const fixture = makeFixture()
+    fixture.store.save({ ...RICH_SCRIPT })
+    rmSync(fixture.scriptPath)
+    const tools = makeTools(fixture)
+
+    const renamed = (await call(tools, 'task_update', {
+      id: RICH_SCRIPT.id,
+      name: '程序待部署',
+    })) as { task: { task_path: string; warnings: string[] } }
+    expect(renamed.task.task_path).toBe(RICH_SCRIPT.task_path)
+    expect(renamed.task.warnings.join('\n')).toMatch(/任务程序当前不可用.*not found/)
+
+    const recron = (await call(tools, 'task_update', {
+      id: RICH_SCRIPT.id,
+      cron: '0 4 * * *',
+    })) as { task: { task_path: string; warnings: string[] } }
+    expect(recron.task.task_path).toBe(RICH_SCRIPT.task_path)
+    expect(recron.task.warnings.join('\n')).toMatch(/not found/)
+
+    // 落盘仍是旧路径（没有被改名操作改写 / 清空）。
+    expect(readTaskFile(fixture, RICH_SCRIPT.id)).toMatchObject({
+      task_path: RICH_SCRIPT.task_path,
+      cron: '0 4 * * *',
+    })
+  })
+
+  it('显式提供 task_path 或 kind 变更时仍做 L2 强校验（缺失文件必须失败）', async () => {
+    const fixture = makeFixture()
+    fixture.store.save({ ...RICH_SCRIPT })
+    const tools = makeTools(fixture)
+    await expect(
+      call(tools, 'task_update', { id: RICH_SCRIPT.id, task_path: 'programs/missing.ts' }),
+    ).rejects.toThrow(/not found/)
+    await expect(
+      call(tools, 'task_update', {
+        id: RICH_SCRIPT.id,
+        kind: 'script',
+        task_path: 'programs/missing.ts',
+      }),
+    ).rejects.toThrow(/not found/)
   })
 })
 

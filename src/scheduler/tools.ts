@@ -26,7 +26,7 @@ import { parseCron } from './cron.js'
 import { assertTaskId } from './store.js'
 import type { TaskListResult } from './store.js'
 import type { ScriptTaskDef, TaskDef, TaskKind, TaskRunOutcome, TextTaskDef } from './types.js'
-import { TaskPathError, resolveScriptPath, validateScript, validateScriptFile } from './validate.js'
+import { TaskPathError, resolveScriptPath, validateScript } from './validate.js'
 
 /** 工具错误前缀（错误信息统一可辨识）。 */
 export const SCHEDULER_TOOLS_TAG = '[scheduler/tools]'
@@ -281,10 +281,16 @@ function carryOver(task: TaskDef): {
   }
 }
 
-/** 非破坏性警告：script 任务程序当前是否可用（不存在 / 不可读等）。 */
+/**
+ * 非破坏性警告：script 任务程序当前是否可用。
+ *
+ * 复用 {@link validateScript}（L1 形态 + L2 存在性 / 可读性），与 runner 的触发期
+ * 校验口径完全一致：手工落盘 / 迁移来的 `.py` 等非法扩展名也会在这里提示，
+ * 而不是等到触发时才 failed/runtime。
+ */
 async function scriptWarnings(workspace: string, taskPath: string): Promise<string[]> {
   try {
-    await validateScriptFile(resolveScriptPath(workspace, taskPath))
+    await validateScript(workspace, taskPath)
     return []
   } catch (error) {
     const reason = error instanceof TaskPathError ? error.reason : String(error)
@@ -426,34 +432,132 @@ const TASK_LIST_OUTPUT_SCHEMA: ToolDefinition['output']['schema'] = {
   additionalProperties: false,
 }
 
-/** `task_run_now` 出参：运行结局（六态判别联合）。 */
+/**
+ * `task_run_now` 出参：运行结局（六态判别联合）。
+ *
+ * 以 `oneOf` 按 `kind` 收紧 required：每个分支用 `const` 固定 `kind`，保证
+ * 「恰好命中一个分支」；这样 failed 必须带 failureKind / notified /
+ * consecutiveFailures，woke 必须带 data / targets，queued 必须带 targets，
+ * missed 必须带 scheduledAt（ISO 字符串，见 {@link serializeRunOutcome}）。
+ *
+ * 注：dsh-tools 的 schema 子集不允许同一节点同时声明 `type` 与 `oneOf`
+ * （`cannot declare both type and oneOf`），且结构化输出的 object-root 约束只
+ * 适用于 subagent / workflow，不适用于工具出参；工具出参在注册期由
+ * `assertSupportedJsonSchema` 校验（任意 JSON 根）。因此这里用 oneOf 根表达
+ * 判别联合，而不是 `type: 'object'` + 无法表达的按 kind 条件 required。
+ */
 const TASK_RUN_OUTPUT_SCHEMA: ToolDefinition['output']['schema'] = {
-  type: 'object',
-  description: '单次任务运行的结局',
-  properties: {
-    kind: {
-      type: 'string',
-      enum: ['quiet', 'woke', 'queued', 'skipped', 'failed', 'missed'],
-      description: '结局类型',
+  description: '单次任务运行的结局（六态判别联合，按 kind 收紧 required）',
+  oneOf: [
+    {
+      type: 'object',
+      description: 'quiet：执行完成但无需投递',
+      properties: {
+        kind: { type: 'string', const: 'quiet' },
+        reason: { type: 'string', description: '结局说明' },
+        detail: { type: 'string', description: '补充细节' },
+      },
+      required: ['kind', 'reason'],
     },
-    reason: { type: 'string', description: '结局说明' },
-    data: { type: 'string', description: '投递正文（woke）' },
-    targets: {
-      type: 'array',
-      description: '投递目标（woke / queued）',
-      items: { type: 'string' },
+    {
+      type: 'object',
+      description: 'woke：目标 live，消息已投递',
+      properties: {
+        kind: { type: 'string', const: 'woke' },
+        reason: { type: 'string', description: '结局说明' },
+        data: { type: 'string', description: '投递正文' },
+        targets: {
+          type: 'array',
+          description: '投递目标',
+          items: { type: 'string' },
+        },
+        fallbackFrom: {
+          type: 'string',
+          description: '自定义 session 不可达时的回退来源',
+        },
+        detail: { type: 'string', description: '补充细节' },
+      },
+      required: ['kind', 'reason', 'data', 'targets'],
     },
-    fallbackFrom: { type: 'string', description: '自定义 session 不可达时的回退来源' },
-    detail: { type: 'string', description: '补充细节' },
-    failureKind: {
-      type: 'string',
-      enum: ['missing', 'runtime', 'exec', 'parse', 'deliver'],
-      description: '失败分类（failed）',
+    {
+      type: 'object',
+      description: 'queued：目标未 live，消息已入内存 outbox',
+      properties: {
+        kind: { type: 'string', const: 'queued' },
+        reason: { type: 'string', description: '结局说明' },
+        targets: {
+          type: 'array',
+          description: '投递目标',
+          items: { type: 'string' },
+        },
+        fallbackFrom: {
+          type: 'string',
+          description: '自定义 session 不可达时的回退来源',
+        },
+        detail: { type: 'string', description: '补充细节' },
+      },
+      required: ['kind', 'reason', 'targets'],
     },
-    notified: { type: 'boolean', description: '是否已投递失败通知（failed）' },
-    consecutiveFailures: { type: 'number', description: '连续失败次数（failed）' },
-  },
-  required: ['kind', 'reason'],
+    {
+      type: 'object',
+      description: 'skipped：本次触发被跳过（冷却 / 单飞 / 投递跳过）',
+      properties: {
+        kind: { type: 'string', const: 'skipped' },
+        reason: { type: 'string', description: '结局说明' },
+        detail: { type: 'string', description: '补充细节' },
+      },
+      required: ['kind', 'reason'],
+    },
+    {
+      type: 'object',
+      description: 'failed：执行 / 投递失败',
+      properties: {
+        kind: { type: 'string', const: 'failed' },
+        reason: { type: 'string', description: '结局说明' },
+        detail: { type: 'string', description: '补充细节' },
+        failureKind: {
+          type: 'string',
+          enum: ['missing', 'runtime', 'exec', 'parse', 'deliver'],
+          description: '失败分类',
+        },
+        notified: { type: 'boolean', description: '是否已投递失败通知' },
+        consecutiveFailures: { type: 'number', description: '连续失败次数' },
+      },
+      required: ['kind', 'reason', 'failureKind', 'notified', 'consecutiveFailures'],
+    },
+    {
+      type: 'object',
+      description: 'missed：离线队列中的消息过期被丢弃',
+      properties: {
+        kind: { type: 'string', const: 'missed' },
+        reason: { type: 'string', description: '结局说明' },
+        detail: { type: 'string', description: '补充细节' },
+        scheduledAt: {
+          type: 'string',
+          description: '消息原定投递时刻（ISO 8601 字符串）',
+        },
+      },
+      required: ['kind', 'reason', 'scheduledAt'],
+    },
+  ],
+}
+
+/**
+ * 运行结局 → 工具出参（lossless JSON）。
+ *
+ * `TaskRunOutcome.missed.scheduledAt` 在内部是 `Date`（且**必填**，与
+ * {@link TASK_RUN_OUTPUT_SCHEMA} 的 missed 分支 required 一致）；JSON Schema
+ * 没有 Date 类型，dsh-tools 会以「must be a lossless JSON object」拒绝。这里在
+ * **输出边界**把它序列化为 ISO 8601 字符串（schema 声明为 string），其余结局
+ * 原样返回（保持对象身份，避免无意义的拷贝改变调用方可见行为）。
+ *
+ * `instanceof Date` 判断在类型层恒真，保留它是为兜底未走类型检查的 JS 调用方：
+ * 传进来的若已不是 Date，就不做转换、让它原样落到输出校验（被 schema 拒绝），
+ * 而不是把非 Date 值伪造成 ISO 字符串。
+ */
+function serializeRunOutcome(outcome: TaskRunOutcome): unknown {
+  if (outcome.kind !== 'missed' || !(outcome.scheduledAt instanceof Date)) return outcome
+  return { ...outcome, scheduledAt: outcome.scheduledAt.toISOString() }
 }
 
 const ID_PARAMETER = {
@@ -748,11 +852,19 @@ function createTaskUpdateTool(options: SchedulerToolsOptions): ToolDefinition {
         if (!allowScript) {
           throw new SchedulerToolError('当前配置不允许创建 / 更新 script 任务（allowScript=false）')
         }
-        const sourcePath = record.task_path === undefined ? scriptPathOf(existing) : record.task_path
+        const explicitPath = record.task_path !== undefined
+        const kindChanged = record.kind !== undefined && kind !== kindOf(existing)
+        const sourcePath = explicitPath ? (record.task_path as string) : scriptPathOf(existing)
         if (sourcePath === undefined) {
           throw new SchedulerToolError('script 任务必须提供 task_path')
         }
-        const taskPath = await validateTaskPath(workspace, sourcePath)
+        // 只在「显式提供 task_path」或「kind 变更」时做 L2 强校验。
+        // 仅改名 / 改 cron / 改 name 时保留旧路径并通过：程序文件可能暂时缺失
+        // （例如等待部署），此时视图 warnings 会提示不可用，改名不应被硬失败。
+        const taskPath =
+          explicitPath || kindChanged
+            ? await validateTaskPath(workspace, sourcePath)
+            : sourcePath
         task = assembleTask({
           id,
           name,
@@ -919,7 +1031,7 @@ function createTaskRunNowTool(options: SchedulerToolsOptions): ToolDefinition {
       if (options.runNow === undefined) {
         throw new SchedulerToolError(`当前环境未提供立即执行能力（runNow 未注入），无法运行任务 ${id}`)
       }
-      return options.runNow(id)
+      return serializeRunOutcome(await options.runNow(id))
     },
   }
 }

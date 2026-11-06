@@ -341,7 +341,13 @@ export class StateStore {
       writeFileSync(tmp, `${JSON.stringify(state, null, 2)}\n`, 'utf8')
       renameSync(tmp, this.path)
     } catch (error) {
-      if (tmp !== undefined) rmSync(tmp, { force: true })
+      if (tmp !== undefined) {
+        try {
+          rmSync(tmp, { force: true })
+        } catch {
+          // 清理失败不得反向抛出：状态写盘是 best-effort。
+        }
+      }
       this.warn(
         `调度状态写入失败（已忽略，沿用内存结果）：${error instanceof Error ? error.message : String(error)}`,
       )

@@ -7,7 +7,13 @@
  *   - 其余用例全部保留，并补一条 DST 空洞用例（春季跳表时 02:xx 不存在）。
  */
 import { describe, expect, it } from 'vitest'
-import { isValidCron, localParts, next as nextCronTime, parseCron } from '../src/scheduler/cron.js'
+import {
+  MAX_CANDIDATES,
+  isValidCron,
+  localParts,
+  next as nextCronTime,
+  parseCron,
+} from '../src/scheduler/cron.js'
 
 const at = (iso: string): Date => new Date(iso)
 
@@ -22,6 +28,24 @@ describe('cron · 解析', () => {
 
   it('步进写法 `*/15` 命中 0/15/30/45', () => {
     expect(parseCron('*/15 * * * *').minute.values).toEqual([0, 15, 30, 45])
+  })
+
+  it('裸步进 `5/20`：从 5 到字段上界每 20 取一个', () => {
+    expect(parseCron('5/20 * * * *').minute.values).toEqual([5, 25, 45])
+  })
+
+  it('裸步进 `0/15`：从 0 起每 15 分钟', () => {
+    expect(parseCron('0/15 * * * *').minute.values).toEqual([0, 15, 30, 45])
+    expect(nextCronTime(parseCron('0/15 * * * *'), at('2026-01-01T00:07:00Z'), 'UTC').toISOString()).toBe(
+      '2026-01-01T00:15:00.000Z',
+    )
+  })
+
+  it('裸步进 `5/20` 在 next 中按实际命中值推进', () => {
+    const schedule = parseCron('5/20 * * * *')
+    expect(nextCronTime(schedule, at('2026-01-01T00:06:00Z'), 'UTC').toISOString()).toBe(
+      '2026-01-01T00:25:00.000Z',
+    )
   })
 
   it('区间 + 步进 `9-17/2`', () => {
@@ -153,9 +177,15 @@ describe('cron · next（时区感知）', () => {
     )
   })
 
-  it('永不命中的表达式（2 月 31 日）→ 抛错', () => {
+  it('永不命中的表达式（2 月 31 日）→ 在搜索上限内抛错', () => {
     const schedule = parseCron('0 0 31 2 *')
-    expect(() => nextCronTime(schedule, at('2026-01-01T00:00:00Z'), 'UTC')).toThrow(/5 年内/)
+    expect(() => nextCronTime(schedule, at('2026-01-01T00:00:00Z'), 'UTC')).toThrow(/搜索上限/)
+  })
+
+  it('搜索上限是显式有界常量（防止退化成无界循环）', () => {
+    expect(MAX_CANDIDATES).toBe(500_000)
+    expect(Number.isInteger(MAX_CANDIDATES)).toBe(true)
+    expect(MAX_CANDIDATES).toBeGreaterThan(10_000)
   })
 
   it('localParts 返回目标时区墙钟与星期', () => {

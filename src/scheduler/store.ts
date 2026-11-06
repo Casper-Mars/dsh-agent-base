@@ -242,12 +242,19 @@ export class TaskStore {
     return { tasks, corrupted }
   }
 
-  /** 读取单个任务；不存在 / 损坏返回 `undefined`。id 非法仍抛错（编程错误要响亮）。 */
+  /**
+   * 读取单个任务；不存在 / 损坏返回 `undefined`。id 非法仍抛错（编程错误要响亮）。
+   *
+   * 与 {@link list} 保持一致：文件内 `id` 与文件名骨架不一致时视为损坏，
+   * 返回 `undefined`——否则 `get('dup')` 会读出 `dup.json` 里声明的 `id:"other"`，
+   * 与 `list()` 的可见性口径分裂，也会让按 id 的 timer / 状态归属错乱。
+   */
   get(id: string): TaskDef | undefined {
     const path = this.filePath(id)
     try {
       const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'))
-      return isTaskDef(parsed) ? parsed : undefined
+      if (!isTaskDef(parsed)) return undefined
+      return parsed.id === id ? parsed : undefined
     } catch {
       return undefined
     }
@@ -264,13 +271,21 @@ export class TaskStore {
       throw new TaskStoreError(`save 的任务结构非法：${JSON.stringify(task)}`)
     }
     const path = this.filePath(task.id)
-    mkdirSync(this.tasksDir, { recursive: true })
     const tmp = `${path}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
     try {
+      // `tasksDir` 本身是普通文件时 `mkdir` 会抛 EEXIST：必须包进 try，统一
+      // 收敛为 TaskStoreError，避免调用方拿到裸文件系统错误。
+      mkdirSync(this.tasksDir, { recursive: true })
       writeFileSync(tmp, `${JSON.stringify(task, null, 2)}\n`, 'utf8')
       renameSync(tmp, path)
     } catch (error) {
-      rmSync(tmp, { force: true })
+      // 清理临时文件本身也可能失败（例如 tasksDir 不是目录时 rm 抛 ENOTDIR）；
+      // 清理错误不得掩盖原始写入错误，更不能以裸文件系统错误穿透。
+      try {
+        rmSync(tmp, { force: true })
+      } catch {
+        // 忽略：tmp 未创建或不可清理都不影响错误收敛。
+      }
       throw new TaskStoreError(
         `写入任务 ${task.id} 失败：${error instanceof Error ? error.message : String(error)}`,
       )

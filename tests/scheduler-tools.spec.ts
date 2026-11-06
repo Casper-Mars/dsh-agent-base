@@ -168,7 +168,11 @@ describe('工具契约', () => {
     for (const item of tools) {
       expect(item.description.length).toBeGreaterThan(0)
       expect(item.parameters).toMatchObject({ type: 'object', additionalProperties: false })
-      expect(item.output.schema).toMatchObject({ type: 'object' })
+      // task_run_now 用 oneOf 根表达判别联合（工具出参不要求 object-root）；
+      // 其余工具出参仍是 object 根。
+      expect(item.output.schema).toMatchObject(
+        item.name === 'task_run_now' ? { oneOf: expect.any(Array) } : { type: 'object' },
+      )
       expect(typeof item.output.render).toBe('function')
       expect(item.execute).toBeInstanceOf(Function)
     }

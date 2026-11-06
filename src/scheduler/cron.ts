@@ -43,8 +43,13 @@ export interface CronSchedule {
 const MONTH_NAMES = ['JAN', 'FEB', 'MAR', 'APR', 'MAY', 'JUN', 'JUL', 'AUG', 'SEP', 'OCT', 'NOV', 'DEC'] as const
 const DOW_NAMES = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT'] as const
 
-/** 单个候选最大循环次数（5 年按「跳级」推进，远小于分钟数上限）。 */
-const MAX_CANDIDATES = 500_000
+/**
+ * 单个候选最大循环次数。
+ *
+ * 搜索按「月 → 日 → 时 → 分」跳级推进，500k 步足以跨越数百年；这里显式导出，
+ * 便于测试断言搜索上限存在且不可被非法表达式绕过（防止退化成无界循环）。
+ */
+export const MAX_CANDIDATES = 500_000
 
 function fieldError(expr: string, field: string, detail: string): Error {
   return new Error(`[cron] ${JSON.stringify(expr)} 非法：${field} ${detail}`)
@@ -271,7 +276,8 @@ function matchesDay(schedule: CronSchedule, parts: LocalParts): boolean {
  * @param from 起始时刻。
  * @param timezone IANA 时区名；缺省 `UTC`（调用方应传显式时区）。
  * @returns 绝对时刻（UTC `Date`）。
- * @throws 5 年内找不到触发时刻时抛错（例如 `0 0 31 2 *`）。
+ * @throws 在 {@link MAX_CANDIDATES} 步搜索上限内找不到触发时刻时抛错
+ *         （例如 `0 0 31 2 *`）。
  */
 export function next(schedule: CronSchedule, from: Date, timezone = 'UTC'): Date {
   const startMs = Math.floor(from.getTime() / 60_000) * 60_000 + 60_000
@@ -308,5 +314,7 @@ export function next(schedule: CronSchedule, from: Date, timezone = 'UTC'): Date
     naive += 60_000
   }
 
-  throw new Error(`[cron] ${JSON.stringify(schedule.expr)} 非法：5 年内无法找到下一触发时刻`)
+  throw new Error(
+    `[cron] ${JSON.stringify(schedule.expr)} 非法：在搜索上限（${MAX_CANDIDATES} 步）内无法找到下一触发时刻`,
+  )
 }

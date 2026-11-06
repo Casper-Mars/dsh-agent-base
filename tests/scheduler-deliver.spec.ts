@@ -392,6 +392,27 @@ describe('内存 outbox', () => {
     expect(h.logs.warn.some((m) => m.includes('missed'))).toBe(true)
   })
 
+  it('过期条目在 expire / flush 前不再占用 20 条额度', async () => {
+    const h = setup({ pendingTtlMs: 1000 })
+    for (let i = 0; i < DEFAULT_MAX_PENDING_PER_TASK; i += 1) {
+      await expect(
+        h.port.deliver(input({ text: `旧消息-${i}`, sessionId: `off-${i % 2}` })),
+      ).resolves.toBe('queued')
+    }
+    expect(h.port.pendingCount()).toBe(DEFAULT_MAX_PENDING_PER_TASK)
+
+    // 全部过期但尚未 expire / flush：新消息不应被 overflow 拒绝；
+    // 入队入口会先物理清扫该任务的过期条目（避免无界堆积），因此队列只剩新消息。
+    h.advance(1000)
+    await expect(
+      h.port.deliver(input({ text: '过期后的新消息', sessionId: 'off-new' })),
+    ).resolves.toBe('queued')
+    expect(h.port.pendingCount()).toBe(1)
+    expect(h.port.pendingCount('off-new')).toBe(1)
+    // 其它任务的过期条目不受本次定向清扫影响，仍由 expire 统一处理。
+    expect(h.port.expire()).toBe(0)
+  })
+
   it('按 sessionId 分桶：flush 一个桶不影响另一个', async () => {
     const h = setup()
     await h.port.deliver(input({ text: '给 s1', sessionId: 's1' }))

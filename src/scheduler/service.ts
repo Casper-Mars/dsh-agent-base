@@ -291,9 +291,15 @@ export class SchedulerService {
       return Promise.resolve(skipped)
     }
 
+    // 代际快照：`stop` / `reload` 之后旧的在飞任务晚结算时，不得覆盖新代际
+    // 已经写入的 lastOutcome（否则诊断面会「时光倒流」）。outcome 仍照常返回
+    // 给本次调用方，只是不再写入诊断状态。
+    const runEpoch = this.epoch
     const promise = this.execute(taskId).then((outcome) => {
-      this.outcomes.set(taskId, outcome)
-      this.logOutcome(taskId, outcome)
+      if (runEpoch === this.epoch) {
+        this.outcomes.set(taskId, outcome)
+        this.logOutcome(taskId, outcome)
+      }
       return outcome
     })
     this.inFlight.set(taskId, promise)

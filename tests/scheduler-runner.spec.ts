@@ -173,6 +173,23 @@ describe('runner · stdout 按 UTF-8 字节有界', () => {
     expect(child.signals).toEqual(['SIGKILL'])
   })
 
+  it('ASCII 大块 + 多字节混合：按字节计数（按字符计数会漏杀）', async () => {
+    const child = fakeChild()
+    const { strategy } = harness(child)
+    // 90 个 ASCII 字节 + 10 个汉字（30 字节）：共 120 字节，但只有 100 个字符。
+    // 若实现按「字符数」计数，100 <= 100 就不会触发截断（M4 变异存活）。
+    const promise = strategy.exec({ ...INPUT, maxStdoutBytes: 100 })
+    child.stdout.emit('data', Buffer.from(`${'a'.repeat(90)}${'中'.repeat(10)}`, 'utf8'))
+
+    const result = await promise
+    expect(result.truncated).toBe(true)
+    expect(child.signals).toEqual(['SIGKILL'])
+    // 90 + 3 个汉字（9 字节）= 99 字节；第 4 个汉字只放得下 1 字节，整块丢弃。
+    expect(result.stdout).toBe(`${'a'.repeat(90)}${'中'.repeat(3)}`)
+    expect(Buffer.byteLength(result.stdout, 'utf8')).toBeLessThanOrEqual(100)
+    expect(result.stdout.includes('\uFFFD')).toBe(false)
+  })
+
   it('跨 chunk 的多字节字符不被切半（StringDecoder）', async () => {
     const child = fakeChild()
     const { strategy } = harness(child)
