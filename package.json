@@ -1,6 +1,6 @@
 {
   "name": "dsh-agent-base",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "type": "module",
   "description": "固定 Workspace 与 main session id 的基础插件（dsh）：提供身份与路径，并内置文件驱动的定时任务调度（text / script）",
   "keywords": [
@@ -24,7 +24,15 @@
       "default": "./dist-server/index.js"
     },
     "./cordis.patch.yml": "./cordis.patch.yml",
-    "./package.json": "./package.json"
+    "./package.json": "./package.json",
+    "./tools/task-leader": {
+      "types": "./dist-server/types/tools/task-leader.d.ts",
+      "default": "./dist-server/tools/task-leader.js"
+    },
+    "./tools/task-readonly": {
+      "types": "./dist-server/types/tools/task-readonly.d.ts",
+      "default": "./dist-server/tools/task-readonly.js"
+    }
   },
   "files": [
     "dist-server/**/*.js",

@@ -232,14 +232,16 @@ describe('mountScheduler', () => {
     expect(vi.getTimerCount()).toBe(1)
   })
 
-  it('默认装配 8 个工具，诊断服务可查询 scheduledIds / status', async () => {
+  it('host 不注册工具，agentSchedulerTools 工厂提供 8 个定义', async () => {
     const workspace = await makeWorkspace()
     await writeTask(workspace, textTask())
     const { ctx, tools } = createHarness()
 
     await apply(ctx, configOf(workspace))
 
-    expect(tools.registrations.map((definition) => definition.name).sort()).toEqual([
+    expect(tools.registrations).toHaveLength(0)
+    const definitions = (ctx.get('agentSchedulerTools') as { createTools(): ToolDefinition[] }).createTools()
+    expect(definitions.map((definition) => definition.name).sort()).toEqual([
       'task_create',
       'task_delete',
       'task_disable',
@@ -265,8 +267,9 @@ describe('mountScheduler', () => {
 
     await apply(ctx, configOf(workspace))
 
+    const definitions = (ctx.get('agentSchedulerTools') as { createTools(): ToolDefinition[] }).createTools()
     for (const name of ['task_create', 'task_update']) {
-      const definition = tools.registrations.find((tool) => tool.name === name)
+      const definition = definitions.find((tool) => tool.name === name)
       expect(definition).toBeDefined()
       const properties = (definition?.parameters as { properties: Record<string, unknown> })
         .properties
@@ -280,7 +283,7 @@ describe('mountScheduler', () => {
 
     await apply(ctx, configOf(workspace, { allowCustomSession: true }))
 
-    const definition = tools.registrations.find((tool) => tool.name === 'task_create')
+    const definition = (ctx.get('agentSchedulerTools') as { createTools(): ToolDefinition[] }).createTools().find((tool) => tool.name === 'task_create')
     const properties = (definition?.parameters as { properties: Record<string, unknown> })
       .properties
     expect(Object.keys(properties)).toContain('session_id')
@@ -320,27 +323,15 @@ describe('mountScheduler', () => {
     expect(ctx.agentScheduler.scheduledIds).toEqual(['demo'])
   })
 
-  it('单个工具注册失败时回滚已注册项，不抛且不阻断调度', async () => {
+  it('host 不注册工具，工具工厂由 preset 子路径消费', async () => {
     const workspace = await makeWorkspace()
     await writeTask(workspace, textTask())
     const { ctx, tools } = createHarness()
 
-    let calls = 0
-    tools.register.mockImplementation((definition: ToolDefinition) => {
-      calls += 1
-      if (calls === 2) throw new Error('duplicate tool name')
-      tools.registrations.push(definition)
-      const dispose = vi.fn()
-      tools.disposers.push(dispose)
-      return dispose
-    })
-
     await expect(apply(ctx, configOf(workspace))).resolves.toBeUndefined()
-
-    expect(tools.disposers).toHaveLength(1)
-    expect(tools.disposers[0]).toHaveBeenCalledTimes(1)
+    expect(tools.registrations).toHaveLength(0)
+    expect((ctx.get('agentSchedulerTools') as { createTools(): ToolDefinition[] }).createTools()).toHaveLength(8)
     expect(ctx.agentScheduler.scheduledIds).toEqual(['demo'])
-    expect(vi.getTimerCount()).toBe(1)
   })
 
   it('ctx.fiber.dispose() 后停止调度、清理 timer、反注册全部工具', async () => {
@@ -350,7 +341,7 @@ describe('mountScheduler', () => {
 
     await apply(ctx, configOf(workspace))
     const scheduler = ctx.agentScheduler
-    expect(tools.disposers).toHaveLength(8)
+    expect(tools.disposers).toHaveLength(0)
     expect(vi.getTimerCount()).toBe(1)
 
     await ctx.fiber.dispose()
@@ -376,7 +367,7 @@ describe('mountScheduler', () => {
     }
 
     expect(ctx.get('agentBase')).toBeDefined()
-    expect(tools.registrations).toHaveLength(8)
+    expect(tools.registrations).toHaveLength(0)
     expect(ctx.agentScheduler.scheduledIds).toEqual(['demo'])
     expect(vi.getTimerCount()).toBe(1)
   })
@@ -629,7 +620,7 @@ describe('mountScheduler', () => {
       }
 
       expect(ctx.get('agentBase')).toBeDefined()
-      expect(tools.registrations).toHaveLength(8)
+      expect(tools.registrations).toHaveLength(0)
       expect(ctx.agentScheduler.scheduledIds).toEqual(['demo'])
       expect(vi.getTimerCount()).toBe(1)
     },

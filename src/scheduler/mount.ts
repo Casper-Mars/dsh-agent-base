@@ -6,19 +6,17 @@
  *
  * 顺序：
  *   resolve tasksDir → TaskStore / StateStore → DeliveryPort → SchedulerService
- *   → 注册 8 个 `task_*` 工具 → `scheduler.start()`（必须在工具注册完成之后）
+ *   → 发布 `agentSchedulerTools` 工具工厂 → `scheduler.start()`
  *   → 发布 `ctx.agentScheduler` → 绑定 teardown。
+ *   task_* 工具本身由 preset 子路径（tools/task-leader / task-readonly）注册。
  *
  * 降级策略：
  *   - `scheduler.enabled === false`：直接返回，不注册工具、不建 timer、不发布服务；
  *   - `tasksDir` 非法（绝对路径 / 越界）：warn 后回落到默认目录；
- *   - `tools` 服务缺失或 `register` 不可用：warn，仍从磁盘加载任务并启动调度；
- *   - 工具重名 / 单个注册失败：warn + 回滚已注册项，不阻断调度；
  *   - teardown 绑定失败：warn（生命周期兜底能力缺失，但不影响本次运行）。
  */
 import { statSync } from 'node:fs'
 import type { Context } from '@deepseek-ai/cordis'
-import type { ToolDefinition } from '@deepseek-ai/dsh-tools'
 // 仅加载 `agent/created` 事件的模块增强；调度装配只读事件。
 import type {} from '@deepseek-ai/dsh-agent'
 import type { SchedulerConfig } from '../config.js'
@@ -32,11 +30,6 @@ import type { StateStore } from './state.js'
 import { DEFAULT_TASKS_SUBDIR, createTaskStore, resolveTasksDir } from './store.js'
 import type { TaskStore } from './store.js'
 import { createSchedulerTools } from './tools.js'
-
-/** 工具注册表的最小面（`ctx.tools` 结构兼容；缺失时降级）。 */
-interface ToolsRegistryLike {
-  register(definition: ToolDefinition): () => void
-}
 
 /** mount 层日志出口；四个级别全部存在，调用永不抛。 */
 interface MountLogger {
@@ -177,23 +170,6 @@ function resolveMountLogger(ctx: Context): MountLogger {
   return consoleLogger()
 }
 
-/** 取工具服务；缺失 / 形状不符返回 `undefined`，绝不抛。 */
-function getToolsRegistry(ctx: Context): ToolsRegistryLike | undefined {
-  try {
-    const tools = (ctx as unknown as { get(name: string): unknown }).get('tools')
-    if (
-      typeof tools === 'object' &&
-      tools !== null &&
-      typeof (tools as ToolsRegistryLike).register === 'function'
-    ) {
-      return tools as ToolsRegistryLike
-    }
-  } catch {
-    // 服务解析失败按「不可用」处理。
-  }
-  return undefined
-}
-
 /** 从 `agent/created` 载荷里取 session id（兼容直接传 id 的测试替身）。 */
 function sessionIdOf(payload: unknown): string | undefined {
   if (typeof payload === 'string') return payload
@@ -326,47 +302,23 @@ export function mountScheduler(
       maxStderrBytes: config.maxOutputBytes,
     })
 
-    // 2) 注册工具；工具服务缺失时只降级，不影响从磁盘加载任务与调度。
-    const tools = getToolsRegistry(ctx)
-    if (tools === undefined) {
-      log.warn('tools 服务不可用，task_* 工具已跳过注册（调度仍会启动）')
-    } else {
-      try {
-        const definitions = createSchedulerTools({
-          store,
-          workspace,
-          allowScript: config.allowScript,
-          allowCustomSession: config.allowCustomSession,
-          onChange: () => scheduler?.reload(),
-          runNow: (id) => scheduler!.runNow(id),
-          logger: log,
-        })
-        for (const definition of definitions) {
-          try {
-            const dispose = tools.register(definition)
-            disposers.push(typeof dispose === 'function' ? dispose : () => {})
-          } catch (error) {
-            log.warn(
-              `工具 ${definition.name} 注册失败，回滚本次已注册的全部调度工具：` +
-                describeError(error),
-            )
-            for (const registered of disposers.splice(0).reverse()) {
-              try {
-                registered()
-              } catch {
-                // 回滚阶段的二次失败无补救手段，忽略。
-              }
-            }
-            break
-          }
-        }
-      } catch (error) {
-        log.warn(`创建调度工具失败（已跳过注册）：${describeError(error)}`)
-      }
+    // 2) 发布工具工厂；工具注册由 preset 子路径（tools/task-leader|task-readonly）完成。
+    const createTools = () => createSchedulerTools({
+      store: store!,
+      workspace,
+      allowScript: config.allowScript,
+      allowCustomSession: config.allowCustomSession,
+      onChange: () => scheduler?.reload(),
+      runNow: (id) => scheduler!.runNow(id),
+      logger: log,
+    })
+    try {
+      ;(ctx as unknown as { provide: (name: string, value: unknown) => void }).provide('agentSchedulerTools', { createTools })
+    } catch (error) {
+      log.warn(`agentSchedulerTools 服务发布失败，task_* 工具将不可用：${describeError(error)}`)
     }
 
-    // 3) 工具注册完成后启动（start 内部逐任务隔离异常）。先启动再发布服务，
-    //    避免 start 抛错时留下已注册却不可用的 `ctx.agentScheduler`。
+    // 3) 启动调度；工具由 preset 子路径自行注册。
     const stats = scheduler.start()
     log.info(
       `调度器已启动：任务目录=${tasksDir}，时区=${scheduler.timezone}，` +
