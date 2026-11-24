@@ -3,6 +3,16 @@
 本文件格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，
 版本号遵循 [Semantic Versioning](https://semver.org/lang/zh-CN/)。
 
+## [0.4.0] - 2026-11-24
+
+### Changed
+
+- 兼容 dsh `0.2.2-rc.5`：新增 `engines.dsh`（`>=0.2.1-rc.2 <0.3.0`），
+  peer 依赖改为同一范围，`@deepseek-ai/cordis` 放宽到 `>=4.0.5 <5.0.0`。
+- 开发依赖升级到 dsh `0.2.2-rc.5` / cordis `4.1.0`，测试与构建在 Node 24/26 上通过。
+- 注意：dsh `0.2.2-rc.5` 自身要求 Node `>=24.9.0`；本包仍保留 Node `>=22.19.0`
+  以兼容 0.2.1 运行时，实际可运行版本由 dsh 的引擎约束决定。
+
 ## [0.2.0] - 2026-11-06
 
 新增定时调度子系统。本版本为**新增能力**，既有的固定 workspace 解析、main session
