@@ -59,7 +59,8 @@
     "typecheck:examples": "tsc -p tsconfig.examples.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "clean": "rm -rf dist dist-server",
-    "prepublishOnly": "pnpm build"
+    "prepublishOnly": "pnpm build",
+    "compat": "bash scripts/dsh-compat.sh"
   },
   "dependencies": {
     "@deepseek-ai/cordis-plugin-logger-console": "~1.0.4",

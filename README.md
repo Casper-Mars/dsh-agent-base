@@ -8,6 +8,23 @@ workspace 生命周期会在 `apply()` 返回、宿主（Cordis loader）全部 
 > **适用范围：仅 web profile。** 本包通过 bundle patch 禁用 `directory-picker`，
 > web 组合里存在该行，其他 profile 没有；装到别的 profile 会报找不到该行。
 
+[![dsh compatibility](https://github.com/Casper-Mars/dsh-agent-base/actions/workflows/dsh-compat.yml/badge.svg)](https://github.com/Casper-Mars/dsh-agent-base/actions/workflows/dsh-compat.yml)
+
+## 兼容性
+
+`engines.dsh` 声明 `>=0.2.1-rc.2 <0.3.0`。CI 在每次合并进 `main` 时跑
+「安装准入 → patch 组合 → 冷启动探针」三层校验，并每天巡检 npm 上的 latest / next；
+定时巡检发现不兼容会自动开 `dsh-compat` issue，恢复后自动关闭。
+
+本地复现：
+
+```bash
+pnpm compat                 # npm latest
+pnpm compat 0.2.2-rc.5      # 指定版本
+```
+
+冷启动探针会断言 `ctx.agentBase` 与 `ctx.agentScheduler` 均已发布；当前已验证 dsh `0.2.2-rc.5`。
+
 ## 它做什么
 
 - 禁用 `directory-picker`（`@deepseek-ai/dsh-host-directory-picker-auto`）：
